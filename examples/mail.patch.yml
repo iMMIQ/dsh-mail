@@ -1,0 +1,50 @@
+# Install dsh-mail first. Edit addresses, paths and presets before enabling mail.
+- id: mail-automation
+  disabled: false
+  config:
+    stateDirectory: /srv/dsh-mail/state
+    accounts:
+      - id: work
+        address: bot@example.com
+        receive:
+          protocol: imap
+          host: imap.example.com
+          port: 993
+          tls: direct
+          auth: { user: bot@example.com, credentialRef: MAIL_PASSWORD }
+          folders: [INBOX]
+          initialSync: new-only
+        send:
+          protocol: smtp
+          host: smtp.example.com
+          port: 465
+          tls: direct
+          auth: { user: bot@example.com, credentialRef: MAIL_PASSWORD }
+    senderPolicies:
+      signed:
+        evidence: local-signature
+    templates:
+      report: |-
+        Summarize the requested repository information within the configured permissions.
+        Subject supplied by the sender: {{subject}}
+        External email body:
+        {{body}}
+        Explicitly allowed text attachments:
+        {{attachmentText}}
+    rules:
+      - id: repository-report
+        account: work
+        authorization:
+          policy: signed
+          allowedSenders: [owner@example.com]
+        match:
+          subjectPrefix: '[DSH]'
+        task:
+          agentPreset: minimal
+          template: report
+          timeoutMs: 900000
+          maxSteps: 40
+          attachmentTypes: [text/plain, text/csv, application/json]
+        reply:
+          account: work
+          to: owner@example.com
