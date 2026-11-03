@@ -22,9 +22,9 @@ export function MailPage(props: PageProps) {
   const rule = draft?.rules.find(value => value.id === state.ruleId)
   const policy = rule ? draft?.senderPolicies[rule.authorization.policy] : undefined
   const field = (id: string, label: MailLocaleKey, value: string | number, edit: (text: string) => void, numeric = false) => (
-    <SettingsValueField key={id} id={`dsh-mail-${id}`} label={t(label)} text={state.fields[id] ?? String(value)} numeric={numeric}
+    <div key={id} className="mail-field"><SettingsValueField id={`dsh-mail-${id}`} label={t(label)} text={state.fields[id] ?? String(value)} numeric={numeric}
       disabled={disabled} invalid={numeric && state.fields[id] !== undefined && (!/^\d+$/.test(state.fields[id]!) || Number(state.fields[id]) < 1)}
-      invalidLabel={t('invalid')} overridden={false} overriddenLabel={t('overridden')} resetLabel={t('reset')} onEdit={edit} onReset={() => edit(String(value))} />
+      invalidLabel={t('invalid')} overridden={false} overriddenLabel={t('overridden')} resetLabel={t('reset')} onEdit={edit} onReset={() => edit(String(value))} /></div>
   )
   const accountField = (key: string, label: MailLocaleKey, value: string | number, numeric = false) => field(`account.${account!.id}.${key}`, label, value, text => props.editAccount(key, text), numeric)
   const ruleField = (key: string, label: MailLocaleKey, value: string | number, numeric = false) => field(`rule.${rule!.id}.${key}`, label, value, text => props.editRule(key, text), numeric)
@@ -46,19 +46,25 @@ export function MailPage(props: PageProps) {
           <div className="mail-grid">{(['receive', 'send'] as const).map(side => {
             const connection = account[side]
             if (!connection) return null
-            const secret = state.credentials[connection.auth.credentialRef]
-            const shared = side === 'send' && account.receive?.auth.credentialRef === connection.auth.credentialRef
             return <section key={side}><h3>{t(side)}</h3>
               {accountField(`${side}.host`, 'host', connection.host)}
               <div className="mail-grid">{accountField(`${side}.port`, 'port', connection.port, true)}
                 {options('tls', connection.tls, [{ id: 'direct', label: t('direct') }, { id: 'starttls', label: t('starttls') }], text => props.editAccount(`${side}.tls`, text))}</div>
               {accountField(`${side}.user`, 'user', connection.auth.user)}
-              {side === 'send' && account.receive && <div className="mail-row"><span>{t('sharedCode')}</span><Switch label={t('sharedCode')} checked={shared} disabled={disabled} onChange={checked => props.editAccount('sharedCredential', String(checked))} /></div>}
-              {!shared && <SettingsSecretField id={`mail-${account.id}-${side}-code`} label={t('authorizationCode')} hint={secret?.remove ? t('codeWillRemove') : t('codeHint')} text={secret?.text ?? ''}
-                configured={secret?.configured ?? false} disabled={disabled || !secret?.ready || !secret.writable} stateLabel={t(!secret?.ready ? 'codeLoading' : secret.configured ? 'codeSet' : 'codeUnset')}
-                onEdit={text => props.editCredential(connection.auth.credentialRef, text)} />}
-              {!shared && (secret?.configured || secret?.remove) && <Button size="sm" disabled={disabled || !secret.writable} onClick={() => props.removeCredential(connection.auth.credentialRef)}>{t(secret.remove ? 'undoRemoveCode' : 'removeCode')}</Button>}
             </section>
+          })}</div>
+          {account.receive && account.send && <div className="mail-row"><span>{t('sharedCode')}</span><Switch label={t('sharedCode')} checked={account.receive.auth.credentialRef === account.send.auth.credentialRef} disabled={disabled} onChange={checked => props.editAccount('sharedCredential', String(checked))} /></div>}
+          <div className={account.receive && account.send && account.receive.auth.credentialRef !== account.send.auth.credentialRef ? 'mail-grid' : 'mail-stack'}>{(['receive', 'send'] as const).map(side => {
+            const connection = account[side]
+            if (!connection || side === 'send' && account.receive?.auth.credentialRef === connection.auth.credentialRef) return null
+            const secret = state.credentials[connection.auth.credentialRef]
+            const separate = account.receive && account.send && account.receive.auth.credentialRef !== account.send.auth.credentialRef
+            return <div key={side} className="mail-stack">
+              <div className="mail-field"><SettingsSecretField id={`mail-${account.id}-${side}-code`} label={t(separate ? side === 'receive' ? 'incomingCode' : 'outgoingCode' : 'authorizationCode')} hint={secret?.remove ? t('codeWillRemove') : t('codeHint')} text={secret?.text ?? ''}
+                configured={secret?.configured ?? false} disabled={disabled || !secret?.ready || !secret.writable} stateLabel={t(!secret?.ready ? 'codeLoading' : secret.configured ? 'codeSet' : 'codeUnset')}
+                onEdit={text => props.editCredential(connection.auth.credentialRef, text)} /></div>
+              {(secret?.configured || secret?.remove) && <div><Button size="sm" disabled={disabled || !secret.writable} onClick={() => props.removeCredential(connection.auth.credentialRef)}>{t(secret.remove ? 'undoRemoveCode' : 'removeCode')}</Button></div>}
+            </div>
           })}</div>
           {account.receive && accountField('receive.folders', 'folders', account.receive.folders.join(', '))}
           <div className="mail-row"><Button variant="outline" size="sm" disabled={state.dirty || state.checking || state.saving} onClick={props.checkConnection}>{t(state.checking ? 'checking' : 'check')}</Button>
