@@ -17,9 +17,19 @@ const build = await Bun.build({
   sourcemap: 'linked',
 })
 if (!build.success) throw new AggregateError(build.logs, 'Plugin build failed')
+const client = await Bun.build({
+  entrypoints: [`${root}src/client/index.ts`], target: 'browser', format: 'cjs',
+  external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/cordis', 'zod', '@deepseek-ai/dsh-client-store', '@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-primitives'],
+  define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+  tsconfig: `${root}tsconfig.client.json`,
+})
+if (!client.success || !client.outputs[0]) throw new AggregateError(client.logs, 'Client build failed')
+await Bun.write(`${outdir}client.js`, `window.__ModuleLoader__.load({ id: "dsh-mail", factory: (require) => {\nvar module = { exports: {} }; var exports = module.exports;\n${await client.outputs[0].text()}\nreturn module.exports;\n} });\n`)
 const types = Bun.spawn([process.execPath, 'run', '--bun', 'tsc', '-p', `${root}tsconfig.json`], {
   cwd: root,
   stdout: 'inherit',
   stderr: 'inherit',
 })
 if (await types.exited !== 0) throw new Error('Declaration generation failed')
+const clientTypes = Bun.spawn([process.execPath, 'run', '--bun', 'tsc', '-p', `${root}tsconfig.client.json`], { cwd: root, stdout: 'inherit', stderr: 'inherit' })
+if (await clientTypes.exited !== 0) throw new Error('Client declaration generation failed')

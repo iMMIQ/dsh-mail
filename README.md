@@ -14,19 +14,16 @@ cd dsh-mail
 bun install --frozen-lockfile
 bun run build
 bun run dsh plugin --profile web add "$PWD"
-cp examples/mail.patch.yml mail.local.yml
+bun run dsh --profile web --no-open
 ```
 
-编辑 `mail.local.yml` 中的邮箱服务器、发件人、结果收件人和数据目录，具体见[配置说明](docs/configuration.md)。本机配置已被 Git 忽略。安装后的插件默认禁用，示例配置会启用它。
+打开 DSH，进入 **插件 → 已安装 → dsh-mail → 包含的组件 → 配置**：
 
-提供邮箱授权码，然后启动 DSH：
+1. 添加邮箱，填写 IMAP/SMTP 服务器、端口、连接安全和邮箱授权码。收发信可共用授权码，也可分别配置。
+2. 添加规则，设置允许的发件人、主题前缀和结果收件人。
+3. 保存，检查连接，再开启“接收并执行邮件任务”并保存。
 
-```sh
-export MAIL_PASSWORD='你的邮箱授权码'
-bun run dsh --profile web --patch "$PWD/mail.local.yml" --no-open
-```
-
-DSH 必须保持运行才能收信、执行任务和发信。在 DSH 会话中运行 `/mail-status` 查看连接状态。
+授权码由 DSH 凭据存储管理，保存后只显示“已设置”；留空保留原值。连接检查只验证登录，不发送邮件。插件首次安装处于暂停状态，DSH 必须保持运行才能处理邮件。手动配置和来源验证见[配置说明](docs/configuration.md)。
 
 ## 使用
 

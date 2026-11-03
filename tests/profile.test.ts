@@ -13,7 +13,8 @@ import { Config } from '../src/config.ts'
 import { configuration, message } from './helpers.ts'
 import { mailServers, waitFor } from './network.ts'
 
-async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error'): Promise<void> {
+async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure'): Promise<void> {
+  const success = scenario === 'success' || scenario === 'reconfigure'
   await using resources = new AsyncDisposableStack()
   const root = await mkdtemp(join(tmpdir(), 'dsh-mail-profile-'))
   resources.defer(() => rm(root, { recursive: true, force: true }))
@@ -39,8 +40,9 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   const names = ['session-projection', 'session', 'llm', 'tools', 'system-prompt', 'tool-executor-native', 'agent', 'agent-loop',
     'agent-default-model', 'storage', 'storage-sqlite', 'storage-domain', 'session-persistence-jsonl', 'workspace', 'session-title',
     'shell', 'user-approval', 'permission-presets', 'agent-preset-registry', 'agent-preset', 'credentials-local', 'commands']
+  if (scenario === 'reconfigure') names.push('hmr')
   await writeFile(join(profile, 'package.json'), JSON.stringify({ name: 'dsh-mail-test-profile', private: true, type: 'module',
-    dependencies: { ...Object.fromEntries(names.map(name => [`@deepseek-ai/dsh-${name}`, '0.2.2-alpha.2'])), 'dsh-mail': `file:${resolve('.')}` }, dsh: { profile: { bundles: ['dsh-mail'] } } }))
+    dependencies: { ...Object.fromEntries(names.map(name => [`@deepseek-ai/dsh-${name}`, '0.2.2-alpha.2'])), '@deepseek-ai/cordis-plugin-timer': '1.1.8-alpha.1', 'dsh-mail': `file:${resolve('.')}` }, dsh: { profile: { bundles: ['dsh-mail'] } } }))
   const original = configuration(join(root, 'spool'))
   const { workspacePath: _oldWorkspace, permissionPreset: _oldPermissions, ...emailTask } = original.rules[0]!.task
   const config = Config.parse({ ...original, rules: [{ ...original.rules[0]!, task: emailTask }] })
@@ -50,6 +52,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   Object.assign(config.accounts[0]!.receive!, { host: '127.0.0.1', port: servers.imapPort, ca: servers.ca, rescanIntervalMs: 50, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
   Object.assign(config.accounts[0]!.send!, { host: '127.0.0.1', port: servers.smtpPort, ca: servers.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
   const configs: Record<string, object> = {
+    hmr: { root: [] },
     'system-prompt': { personaPrefix: 'Execute the mail task using the available tools.' },
     'agent-loop': { agents: [] },
     'agent-default-model': { provider: 'mail-fixture', model: 'fixture' },
@@ -62,6 +65,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     'credentials-local': { path: join(root, 'credentials.yaml'), watch: false },
   }
   const rows = names.map(name => ({ id: name, name: name === 'shell' ? resolve('tests/fixtures/denied-shell.mjs') : `@deepseek-ai/dsh-${name}`, ...(configs[name] ? { config: configs[name] } : {}) }))
+  if (scenario === 'reconfigure') rows.unshift({ id: 'timer', name: '@deepseek-ai/cordis-plugin-timer' })
   const patches = [{ insert: [...rows,
     { id: 'fixture', name: resolve('tests/fixtures/driver.mjs'), config: { root, scenario } },
   ] }, { id: 'mail-automation', disabled: false, config }]
@@ -80,11 +84,11 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   }, () => `dsh ready; ${output}`)
   servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`).toString())
   await waitFor(() => servers.received.length === 1, () => `result mail; ${output}`)
-  if (scenario === 'success' || scenario === 'model-error') assert.equal(await readFile(join(emailDirectory, 'evidence.txt'), 'utf8'), 'created by a real DSH tool call\n')
+  if (success || scenario === 'model-error') assert.equal(await readFile(join(emailDirectory, 'evidence.txt'), 'utf8'), 'created by a real DSH tool call\n')
   else await assert.rejects(readFile(join(emailDirectory, 'evidence.txt'), 'utf8'), { code: 'ENOENT' })
   await assert.rejects(readFile(join(root, 'evidence.txt'), 'utf8'), { code: 'ENOENT' })
   const requests = z.array(z.object({ tools: z.array(z.string()), roles: z.array(z.string()) })).parse(JSON.parse(await readFile(join(root, 'requests.json'), 'utf8')))
-  assert.equal(requests.length, scenario === 'success' ? 3 : scenario === 'model-error' ? 2 : 1)
+  assert.equal(requests.length, success ? 3 : scenario === 'model-error' ? 2 : 1)
   assert.deepEqual(requests[0]!.tools, ['fixture_write', 'mail_task_result'])
   const logs = await readdir(join(root, 'sessions'), { recursive: true })
   const file = logs.find(name => /(?:^|[/\\])session\.v\d+\.jsonl$/.test(name))
@@ -109,13 +113,25 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   assert.equal(z.object({ cwd: z.string() }).parse(events[0]).cwd, emailDirectory)
   const actual = { input: users[0]!.data.content.map(part => part.text).join('').replace(emailDirectory, '{{workspace}}'), calls, turnEnds: ends, permissions,
     reply: response.body.replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(/Session: mail-[a-f0-9]{64}/, 'Session: {{sessionId}}').replace(emailDirectory, '{{workspace}}').trim() }
-  const snapshots = { success: 'mail-turn', 'text-only': 'mail-text-result', 'empty-result': 'mail-missing-result', 'model-error': 'mail-error' }
+  const snapshots = { success: 'mail-turn', 'text-only': 'mail-text-result', 'empty-result': 'mail-missing-result', 'model-error': 'mail-error', reconfigure: 'mail-turn' }
   const expected: unknown = JSON.parse(await readFile(resolve(`tests/snapshots/${snapshots[scenario]}.json`), 'utf8'))
   assert.deepEqual(actual, expected)
   assert.doesNotMatch(response.body, /PRIVATE_FIXTURE_REASONING/)
+  if (scenario === 'reconfigure') {
+    const status = async () => z.object({ phase: z.string(), health: z.record(z.string(), z.string()), tasks: z.array(z.object({ state: z.string() })).optional() }).parse(JSON.parse(await readFile(join(root, 'status.json'), 'utf8')))
+    await writeFile(join(profile, 'cordis.patch.yml'), dump([...patches.slice(0, -1), { id: 'mail-automation', config: { ...config, enabled: false } }], { noRefs: true }))
+    await waitFor(async () => (await status()).phase === 'paused', () => `mail paused after a live settings write; ${output}`)
+    await writeFile(join(profile, 'cordis.patch.yml'), dump([...patches.slice(0, -1), { id: 'mail-automation', config: { ...config, enabled: true } }], { noRefs: true }))
+    await waitFor(async () => { const current = await status(); return current.phase === 'running' && Object.values(current.health).includes('healthy') }, () => `mail resumed; ${output}`)
+    assert.equal((await status()).tasks?.length, 1)
+    servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] second task', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file.`).toString().replace('<fixture@example.com>', '<second@example.com>'))
+    await waitFor(() => servers.received.length === 2, () => `new mail executes after reconfiguration; ${output}`)
+    assert.equal((await parseMail(servers.received[1]!, config.runtime)).body.includes('Status: succeeded'), true)
+  }
 }
 
 test('real dsh profile runs an email-created Agent, executes tools, persists the turn and sends its reply', () => profileScenario('success'), 60_000)
 test('a final Agent text response is automatically emailed without using the result tool', () => profileScenario('text-only'), 60_000)
 test('a real DSH Agent becoming idle without text or a result is reported as needs_attention', () => profileScenario('empty-result'), 60_000)
 test('a failed real Agent turn emails failure and the last text while excluding reasoning', () => profileScenario('model-error'), 60_000)
+test('live configuration stops and restarts the mail runtime without replaying old mail or retaining the old lock', () => profileScenario('reconfigure'), 60_000)

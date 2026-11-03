@@ -1,10 +1,12 @@
 # 配置
 
-从 [mail.patch.yml](../examples/mail.patch.yml) 复制本机配置，在 DSH 启动时通过 `--patch` 加载，或写入 profile 的 `cordis.patch.yml`。插件行的 `id` 为 `mail-automation`；profile 补丁替换整段 `config`，不会逐字段合并。
+常用设置可在 DSH 的 **插件 → 已安装 → dsh-mail → 包含的组件 → 配置** 中编辑，包括邮箱、授权码、触发规则、结果收件人和任务参数。首次安装默认暂停，保存邮箱和规则后开启接收。授权码写入 DSH 凭据存储，不写入普通配置，也不会回显；环境变量提供的只读凭据需要在宿主环境中修改。
+
+需要手动配置时，从 [mail.patch.yml](../examples/mail.patch.yml) 复制本机配置，通过 `--patch` 加载，或写入 profile 的 `cordis.patch.yml`。插件行的 `id` 为 `mail-automation`；profile 补丁替换整段 `config`，不会逐字段合并。`enabled: false` 暂停收发和任务执行。启动参数覆盖的字段可能在 UI 中只读。
 
 ## 邮箱与数据目录
 
-- `stateDirectory`：可写的绝对目录，用于原始邮件和本机运行锁。请使用仓库外的独立目录。
+- `stateDirectory`：可写的绝对目录，用于原始邮件和本机运行锁，默认 `~/.dsh/mail`。多个实例需使用不同目录；迁移时保留原有邮件数据。
 - `accounts[].id`：账户名称，供规则引用。
 - `accounts[].address`：该账户的邮箱地址。
 - `receive` / `send`：分别配置 IMAP 和 SMTP；一个账户可仅用于收信或发信。

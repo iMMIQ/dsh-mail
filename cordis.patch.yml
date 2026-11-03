@@ -1,6 +1,6 @@
-# Install the bundle first, then replace this row's whole config in a profile patch.
-# No mail is received or sent until the user explicitly configures and enables it.
+# The settings page is available before any mailbox is enabled.
 - insert:
     - id: mail-automation
       name: dsh-mail
-      disabled: true
+      config:
+        enabled: false

@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "lib/client-types",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "bun",
+      "react"
+    ],
+    "noEmit": false
+  },
+  "include": [
+    "src/client/**/*.ts",
+    "src/client/**/*.tsx"
+  ]
+}

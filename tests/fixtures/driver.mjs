@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Test-only deterministic LLM and tool, mounted by the real dsh profile launcher. */
-import { writeFile } from 'node:fs/promises'
+import { writeFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -64,11 +64,15 @@ export function apply(ctx, config) {
   }))
   ctx.inject(['mailAutomation'], child => {
     let ready = false
-    const timer = setInterval(async () => {
-      const status = child.mailAutomation.status()
-      if (!ready && Object.values(status.health).includes('healthy')) { ready = true; process.stdout.write('DSH_MAIL_READY\n') }
-      await writeFile(join(config.root, 'status.json'), JSON.stringify(status))
+    let write = Promise.resolve()
+    const timer = setInterval(() => {
+      write = write.then(async () => {
+        const status = child.mailAutomation.status()
+        if (!ready && Object.values(status.health).includes('healthy')) { ready = true; process.stdout.write('DSH_MAIL_READY\n') }
+        await writeFile(join(config.root, 'status.tmp'), JSON.stringify(status))
+        await rename(join(config.root, 'status.tmp'), join(config.root, 'status.json'))
+      })
     }, 20)
-    child.effect(() => () => clearInterval(timer))
+    child.effect(() => async () => { clearInterval(timer); await write })
   })
 }

@@ -15,9 +15,10 @@
     "types": [
       "bun"
     ],
-    "emitDeclarationOnly": true
+    "emitDeclarationOnly": true,
+    "jsx": "react-jsx"
   },
   "include": [
-    "src/**/*.ts"
+    "src/*.ts"
   ]
 }
