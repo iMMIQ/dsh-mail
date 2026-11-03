@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test } from 'bun:test'
 import { MailRuntime } from '../src/runtime.ts'
 import { ImapReceiver, smtpSender } from '../src/transports.ts'
 import { verifySender } from '../src/auth.ts'
@@ -8,7 +8,8 @@ import { parseMail } from '../src/mail.ts'
 import { fixture, message } from './helpers.ts'
 import { mailServers, waitFor } from './network.ts'
 
-test('real TLS IMAP reception executes and submits a threaded SMTP result', { timeout: 30_000 }, async t => {
+test('real TLS IMAP reception executes and submits a threaded SMTP result', async () => {
+  await using t = new AsyncDisposableStack()
   const servers = await mailServers(t)
   const f = await fixture(t)
   const account = f.config.accounts[0]!
@@ -37,7 +38,8 @@ test('real TLS IMAP reception executes and submits a threaded SMTP result', { ti
 })
 
 for (const behavior of ['reject', 'drop'] as const) {
-  test(`real SMTP ${behavior} preserves rejection versus unknown submission`, { timeout: 30_000 }, async t => {
+  test(`real SMTP ${behavior} preserves rejection versus unknown submission`, async () => {
+    await using t = new AsyncDisposableStack()
     const servers = await mailServers(t, behavior)
     const f = await fixture(t)
     await f.runtime.admit(f.delivery()); await f.finish()
@@ -49,7 +51,8 @@ for (const behavior of ['reject', 'drop'] as const) {
   })
 }
 
-test('an untrusted TLS certificate fails before IMAP can admit messages', { timeout: 30_000 }, async t => {
+test('an untrusted TLS certificate fails before IMAP can admit messages', async () => {
+  await using t = new AsyncDisposableStack()
   const servers = await mailServers(t)
   const f = await fixture(t)
   const account = f.config.accounts[0]!

@@ -6,14 +6,14 @@
 
 ## 安装
 
-需要 Node.js ≥ 24.9、DSH `0.2.2-alpha.2`，以及已开启 IMAP/SMTP 的邮箱。请先在 DSH 中配置好模型。当前从源码安装：
+需要 Bun ≥ 1.4.4、DSH `0.2.2-alpha.2`，以及已开启 IMAP/SMTP 的邮箱。DSH 宿主仍需 Node.js ≥ 24.9；项目的依赖管理、构建和测试使用 Bun。请先在 DSH 中配置好模型。当前从源码安装：
 
 ```sh
 git clone https://github.com/iMMIQ/dsh-mail.git
 cd dsh-mail
-npm ci
-npm run build
-npm exec -- dsh plugin --profile web add "$PWD"
+bun install --frozen-lockfile
+bun run build
+bun run dsh plugin --profile web add "$PWD"
 cp examples/mail.patch.yml mail.local.yml
 ```
 
@@ -23,7 +23,7 @@ cp examples/mail.patch.yml mail.local.yml
 
 ```sh
 export MAIL_PASSWORD='你的邮箱授权码'
-npm exec -- dsh --profile web --patch "$PWD/mail.local.yml" --no-open
+bun run dsh --profile web --patch "$PWD/mail.local.yml" --no-open
 ```
 
 DSH 必须保持运行才能收信、执行任务和发信。在 DSH 会话中运行 `/mail-status` 查看连接状态。
@@ -50,7 +50,7 @@ workspace: /srv/projects/my-project
 任务取消、重试和收发信排查见[故障处理](docs/operations.md)。
 
 ```sh
-npm run check
+bun run check
 ```
 
 执行构建、类型检查和测试，无需真实邮箱或模型密钥。修改源码后重新构建并重启 DSH。

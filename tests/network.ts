@@ -5,7 +5,6 @@ import { setTimeout as delay } from 'node:timers/promises'
 import hoodiecrow from 'hoodiecrow-imap'
 import selfsigned from 'selfsigned'
 import { SMTPServer } from 'smtp-server'
-import type { TestContext } from 'node:test'
 import type { Socket } from 'node:net'
 
 /** Wait for an observable condition; the deadline bounds failure, not readiness. */
@@ -18,7 +17,7 @@ export async function waitFor(condition: () => boolean | Promise<boolean>, descr
 }
 
 /** Both servers require TLS and actual password authentication. */
-export async function mailServers(t: TestContext, submission: 'accept' | 'reject' | 'drop' = 'accept') {
+export async function mailServers(t: AsyncDisposableStack, submission: 'accept' | 'reject' | 'drop' = 'accept') {
   const certificate = await selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
     keySize: 2048, algorithm: 'sha256', extensions: [{ name: 'basicConstraints', cA: true },
       { name: 'subjectAltName', altNames: [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }] }],
@@ -42,7 +41,7 @@ export async function mailServers(t: TestContext, submission: 'accept' | 'reject
     },
   })
   smtp.server.on('connection', socket => { smtpSockets.add(socket); socket.once('close', () => smtpSockets.delete(socket)) })
-  t.after(async () => {
+  t.defer(async () => {
     for (const connection of imap.connections) connection.socket.destroy()
     for (const socket of smtpSockets) socket.destroy()
     await Promise.all([new Promise<void>(resolve => imap.close(resolve)), new Promise<void>(resolve => smtp.close(() => resolve()))])

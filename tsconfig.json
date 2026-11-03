@@ -13,8 +13,9 @@
     "outDir": "lib",
     "rootDir": "src",
     "types": [
-      "node"
-    ]
+      "bun"
+    ],
+    "emitDeclarationOnly": true
   },
   "include": [
     "src/**/*.ts"

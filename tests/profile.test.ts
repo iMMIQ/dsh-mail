@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
-import { test, type TestContext } from 'node:test'
+import { test } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir } from 'node:fs/promises'
@@ -13,12 +13,16 @@ import { Config } from '../src/config.ts'
 import { configuration, message } from './helpers.ts'
 import { mailServers, waitFor } from './network.ts'
 
-async function profileScenario(t: TestContext, scenario: 'success' | 'text-only' | 'empty-result' | 'model-error'): Promise<void> {
+async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error'): Promise<void> {
+  await using resources = new AsyncDisposableStack()
+  const root = await mkdtemp(join(tmpdir(), 'dsh-mail-profile-'))
+  resources.defer(() => rm(root, { recursive: true, force: true }))
+  const servers = await mailServers(resources)
   let child: ChildProcess | undefined
   let exit: Promise<void> | undefined
   let exited = false
-  // Node's after hooks run in registration order: stop the writer before deleting its data.
-  t.after(async () => {
+  // Stop the profile before closing its mail servers and deleting its data.
+  resources.defer(async () => {
     if (!child || !exit) return
     if (!exited) child.kill('SIGTERM')
     const timeout = new AbortController()
@@ -26,9 +30,6 @@ async function profileScenario(t: TestContext, scenario: 'success' | 'text-only'
       await Promise.race([exit, delay(10_000, undefined, { signal: timeout.signal }).then(() => { throw new Error('dsh did not stop after SIGTERM') })])
     } catch (error) { child.kill('SIGKILL'); await exit; throw error } finally { timeout.abort() }
   })
-  const servers = await mailServers(t)
-  const root = await mkdtemp(join(tmpdir(), 'dsh-mail-profile-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
   const home = join(root, 'home')
   const profile = join(home, 'profiles', 'mail-test')
   await mkdir(profile, { recursive: true })
@@ -65,7 +66,9 @@ async function profileScenario(t: TestContext, scenario: 'success' | 'text-only'
     { id: 'fixture', name: resolve('tests/fixtures/driver.mjs'), config: { root, scenario } },
   ] }, { id: 'mail-automation', disabled: false, config }]
   await writeFile(join(profile, 'cordis.patch.yml'), dump(patches, { noRefs: true }))
-  child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'mail-test'],
+  const node = Bun.which('node')
+  if (!node) throw new Error('DSH requires a Node.js host; install Node.js >= 24.9')
+  child = spawn(node, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'mail-test'],
     { cwd: resolve('.'), env: { ...process.env, DSH_HOME: home, MAIL_PASSWORD: 'testpass' }, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''
   child.stdout!.on('data', chunk => { output += String(chunk) })
@@ -112,7 +115,7 @@ async function profileScenario(t: TestContext, scenario: 'success' | 'text-only'
   assert.doesNotMatch(response.body, /PRIVATE_FIXTURE_REASONING/)
 }
 
-test('real dsh profile runs an email-created Agent, executes tools, persists the turn and sends its reply', { timeout: 60_000 }, t => profileScenario(t, 'success'))
-test('a final Agent text response is automatically emailed without using the result tool', { timeout: 60_000 }, t => profileScenario(t, 'text-only'))
-test('a real DSH Agent becoming idle without text or a result is reported as needs_attention', { timeout: 60_000 }, t => profileScenario(t, 'empty-result'))
-test('a failed real Agent turn emails failure and the last text while excluding reasoning', { timeout: 60_000 }, t => profileScenario(t, 'model-error'))
+test('real dsh profile runs an email-created Agent, executes tools, persists the turn and sends its reply', () => profileScenario('success'), 60_000)
+test('a final Agent text response is automatically emailed without using the result tool', () => profileScenario('text-only'), 60_000)
+test('a real DSH Agent becoming idle without text or a result is reported as needs_attention', () => profileScenario('empty-result'), 60_000)
+test('a failed real Agent turn emails failure and the last text while excluding reasoning', () => profileScenario('model-error'), 60_000)

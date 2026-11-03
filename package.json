@@ -6,6 +6,7 @@
   "type": "module",
   "license": "LGPL-3.0-or-later",
   "engines": {
+    "bun": ">=1.4.4",
     "node": ">=24.9.0",
     "dsh": "0.2.2-alpha.2"
   },
@@ -31,7 +32,8 @@
     "LICENSE",
     "COPYING",
     "COPYING.LESSER",
-    "NOTICE"
+    "NOTICE",
+    "scripts/build.ts"
   ],
   "dsh": {
     "bundle": {
@@ -39,12 +41,12 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.check.json --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts",
-    "check": "npm run build && npm run typecheck && npm test",
-    "test:integration": "node --import tsx --test tests/transport.test.ts tests/profile.test.ts",
-    "test:core": "node --import tsx --test tests/core.test.ts tests/signature.test.ts"
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bun --bun tsc -p tsconfig.check.json --noEmit",
+    "test": "bun test ./tests",
+    "check": "bun run build && bun run typecheck && bun run test",
+    "test:integration": "bun test ./tests/transport.test.ts ./tests/profile.test.ts",
+    "test:core": "bun test ./tests/core.test.ts ./tests/signature.test.ts"
   },
   "dependencies": {
     "imapflow": "2.10.0",
@@ -84,8 +86,8 @@
     "hoodiecrow-imap": "3.3.0",
     "selfsigned": "5.5.0",
     "smtp-server": "3.21.3",
-    "tsx": "4.23.15",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "@types/bun": "1.4.4"
   },
   "repository": {
     "type": "git",
@@ -94,5 +96,6 @@
   "homepage": "https://github.com/iMMIQ/dsh-mail#readme",
   "bugs": {
     "url": "https://github.com/iMMIQ/dsh-mail/issues"
-  }
+  },
+  "packageManager": "bun@1.4.4"
 }

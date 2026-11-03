@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test } from 'bun:test'
 import { readFile, writeFile, mkdir, mkdtemp, rm, symlink, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -58,7 +58,8 @@ test('unsigned messages fail local signature verification without enabling a Fro
   await assert.rejects(verifySender(raw, await parseMail(raw, config.runtime), { evidence: 'local-signature' }, new AbortController().signal, 1_000), /signature-invalid/)
 })
 
-test('concurrent duplicate admission creates one task and one reply', async t => {
+test('concurrent duplicate admission creates one task and one reply', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await Promise.all([f.runtime.admit(f.delivery()), f.runtime.admit(f.delivery()), f.runtime.admit(f.delivery())])
   await f.finish()
@@ -69,7 +70,8 @@ test('concurrent duplicate admission creates one task and one reply', async t =>
   assert.equal(f.reports.length, 0)
 })
 
-test('automatic replies are ignored and authorized follow-ups are held', async t => {
+test('automatic replies are ignored and authorized follow-ups are held', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery(1, message('[DSH] auto', 'test', ['Auto-Submitted: auto-replied'])))
   await f.runtime.admit(f.delivery(2, message('[DSH] reply', 'test', ['In-Reply-To: <previous@example.com>'])))
@@ -78,7 +80,8 @@ test('automatic replies are ignored and authorized follow-ups are held', async t
   assert.equal(f.executed.length, 0)
 })
 
-test('unallowlisted sender and stale messages never reach an executor', async t => {
+test('unallowlisted sender and stale messages never reach an executor', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery(1, Buffer.from(message().toString().replace('owner@example.com', 'attacker@example.com'))))
   await f.runtime.admit({ ...f.delivery(2), receivedAt: Date.now() - 200_000_000 })
@@ -87,7 +90,8 @@ test('unallowlisted sender and stale messages never reach an executor', async t 
   assert.equal(f.store.inbox().filter(r => r.state === 'ignored').length, 2)
 })
 
-test('temporary verification failure is retried separately while later mail runs', async t => {
+test('temporary verification failure is retried separately while later mail runs', async () => {
+  await using t = new AsyncDisposableStack()
   let firstAttempts = 0
   const f = await fixture(t, { async verify(_raw, mail) {
     if (mail.subject.endsWith('first') && firstAttempts++ === 0) throw new MailError('dns-temporary', true)
@@ -101,14 +105,16 @@ test('temporary verification failure is retried separately while later mail runs
   assert.equal(f.executed.length, 2)
 })
 
-test('verification failure never invokes the task executor or sends a rejection email', async t => {
+test('verification failure never invokes the task executor or sends a rejection email', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t, { async verify() { throw new MailError('signature-invalid') } })
   await f.runtime.admit(f.delivery()); await f.finish()
   assert.equal(f.store.inbox()[0]?.state, 'quarantined')
   assert.equal(f.executed.length, 0); assert.equal(f.sent.length, 0)
 })
 
-test('unknown SMTP acknowledgement is persisted and never automatically retried', async t => {
+test('unknown SMTP acknowledgement is persisted and never automatically retried', async () => {
+  await using t = new AsyncDisposableStack()
   let sends = 0
   const f = await fixture(t, { async send() { sends++; return { state: 'unknown', reason: 'connection-lost-after-data' } } })
   await f.runtime.admit(f.delivery()); await f.finish()
@@ -122,7 +128,8 @@ test('unknown SMTP acknowledgement is persisted and never automatically retried'
   assert.equal(sends, 2); assert.equal(f.executed.length, 1)
 })
 
-test('temporary SMTP rejection retries only frozen notification content', async t => {
+test('temporary SMTP rejection retries only frozen notification content', async () => {
+  await using t = new AsyncDisposableStack()
   const content: string[] = []
   const f = await fixture(t, { async send(task) {
     content.push(JSON.stringify(task.outbox.text))
@@ -133,7 +140,8 @@ test('temporary SMTP rejection retries only frozen notification content', async 
   assert.equal(content.length, 2); assert.equal(content[0], content[1]); assert.equal(f.executed.length, 1)
 })
 
-test('process restart preserves accepted tasks and quarantines interrupted side effects', async t => {
+test('process restart preserves accepted tasks and quarantines interrupted side effects', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery()); await f.finish()
   const task = f.store.tasks()[0]!
@@ -146,7 +154,8 @@ test('process restart preserves accepted tasks and quarantines interrupted side 
   assert.equal(f.executed.length, 1)
 })
 
-test('restart during sending produces unknown without resubmitting', async t => {
+test('restart during sending produces unknown without resubmitting', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery()); await f.finish()
   const task = f.store.tasks()[0]!
@@ -158,7 +167,8 @@ test('restart during sending produces unknown without resubmitting', async t => 
   assert.equal(f.store.tasks()[0]?.outbox.state, 'unknown'); assert.equal(f.sent.length, 1)
 })
 
-test('workspace serialization is synchronized by an explicit execution barrier', async t => {
+test('workspace serialization is synchronized by an explicit execution barrier', async () => {
+  await using t = new AsyncDisposableStack()
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   let running = 0; let peak = 0; let executions = 0
@@ -175,7 +185,8 @@ test('workspace serialization is synchronized by an explicit execution barrier',
   assert.equal(executions, 2); assert.equal(peak, 1)
 })
 
-test('cancellation drains an active executor before close completes', async t => {
+test('cancellation drains an active executor before close completes', async () => {
+  await using t = new AsyncDisposableStack()
   const entered = Promise.withResolvers<void>()
   let drained = false
   const f = await fixture(t, { executor: { async validate() {}, async execute(_task, signal) {
@@ -188,7 +199,8 @@ test('cancellation drains an active executor before close completes', async t =>
   assert.equal(drained, true); assert.equal(f.store.tasks()[0]?.state, 'cancelled')
 })
 
-test('spool refuses a second owner and detects corrupted stored bytes', async t => {
+test('spool refuses a second owner and detects corrupted stored bytes', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   const second = new Spool(f.spool.directory)
   await assert.rejects(second.open(60_000))
@@ -198,7 +210,8 @@ test('spool refuses a second owner and detects corrupted stored bytes', async t 
   await assert.rejects(f.spool.read(hash), /content-corrupt/)
 })
 
-test('persistent SQLite state reopens with the same deduplication and outbox records', async t => {
+test('persistent SQLite state reopens with the same deduplication and outbox records', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery()); await f.finish()
   const before = f.store.tasks()
@@ -210,7 +223,8 @@ test('persistent SQLite state reopens with the same deduplication and outbox rec
   assert.equal(reopened.inbox().length, 1)
 })
 
-test('dry-run uses the production decision without writing inbox, spool, tasks or outbox', async t => {
+test('dry-run uses the production decision without writing inbox, spool, tasks or outbox', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   const result = await f.runtime.preview(message(), 'work')
   assert.ok('state' in result && result.state === 'matched')
@@ -218,7 +232,8 @@ test('dry-run uses the production decision without writing inbox, spool, tasks o
   assert.equal(f.executed.length, 0); assert.equal(f.sent.length, 0)
 })
 
-test('held replies are re-verified before an operator releases them as independent tasks', async t => {
+test('held replies are re-verified before an operator releases them as independent tasks', async () => {
+  await using t = new AsyncDisposableStack()
   let checks = 0
   const f = await fixture(t, { async verify() { checks++ } })
   await f.runtime.admit(f.delivery(1, message('[DSH] reply', 'do more', ['References: <old@example.com>'])))
@@ -232,7 +247,8 @@ test('held replies are re-verified before an operator releases them as independe
   await assert.rejects(f.runtime.releaseReply(record.id), /not-held/)
 })
 
-test('operator task retry creates a new Session identity and retains the old failure', async t => {
+test('operator task retry creates a new Session identity and retains the old failure', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t, { executor: { async validate() {}, async execute() { return { state: 'failed', summary: 'Task failed.', reason: 'business-failure' } } } })
   await f.runtime.admit(f.delivery()); await f.finish()
   const first = f.store.tasks()[0]!
@@ -243,7 +259,8 @@ test('operator task retry creates a new Session identity and retains the old fai
   assert.equal(tasks[1]?.attempt, 2)
 })
 
-test('timeout aborts the executor and persists timed_out with a final notification', async t => {
+test('timeout aborts the executor and persists timed_out with a final notification', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t, { executor: { async validate() {}, async execute(_task, signal) {
     await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
     return { state: 'cancelled', summary: 'Stopped at the deadline.', reason: 'cancelled' }
@@ -254,7 +271,8 @@ test('timeout aborts the executor and persists timed_out with a final notificati
   assert.equal(f.sent.length, 1)
 })
 
-test('queue saturation leaves the unadmitted UID available for later scans', async t => {
+test('queue saturation leaves the unadmitted UID available for later scans', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   f.config.runtime.maxQueuedTasks = 1
   await f.runtime.admit(f.delivery(1))
@@ -265,7 +283,8 @@ test('queue saturation leaves the unadmitted UID available for later scans', asy
   assert.equal(f.executed.length, 2)
 })
 
-test('corrupted spool blocks processing instead of allowing a later task to run', async t => {
+test('corrupted spool blocks processing instead of allowing a later task to run', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery())
   const record = f.store.inbox()[0]!
@@ -298,7 +317,8 @@ test('the shipped profile patch passes the actual plugin schema', async () => {
   assert.equal(Config.parse(patch[0]!.config).rules[0]?.id, 'repository-report')
 })
 
-test('queued tasks retain snapshots and stop after source policy revocation', async t => {
+test('queued tasks retain snapshots and stop after source policy revocation', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   f.config.runtime.maxConcurrentTasks = 1
   await f.runtime.admit(f.delivery(1)); await f.finish()
@@ -311,7 +331,8 @@ test('queued tasks retain snapshots and stop after source policy revocation', as
   assert.equal(old.authorization.policy.evidence, 'trusted-mta')
 })
 
-test('different accounts and workspaces can execute concurrently without starving an account', async t => {
+test('different accounts and workspaces can execute concurrently without starving an account', async () => {
+  await using t = new AsyncDisposableStack()
   const both = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   const accounts: string[] = []
@@ -343,7 +364,8 @@ test('mail tasks default to full access and do not require a configured director
   assert.equal(config.rules[0]!.task.workspacePath, undefined)
 })
 
-test('authenticated email selects any existing directory without a root allowlist', async t => {
+test('authenticated email selects any existing directory without a root allowlist', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   const selected = await mkdtemp(join(tmpdir(), 'dsh-mail-selected-'))
   f.cleanup.splice(1, 0, () => rm(selected, { recursive: true, force: true }))
@@ -357,7 +379,8 @@ test('authenticated email selects any existing directory without a root allowlis
   assert.doesNotMatch(task.prompt, /workspace:|---/)
 })
 
-test('missing, malformed and invalid email directories are quarantined without creating tasks', async t => {
+test('missing, malformed and invalid email directories are quarantined without creating tasks', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   delete f.config.rules[0]!.task.workspacePath
   await writeFile(join(f.directory, 'not-a-directory'), 'file')
@@ -380,7 +403,8 @@ test('missing, malformed and invalid email directories are quarantined without c
   await assert.rejects(realpath(join(f.directory, 'missing')), { code: 'ENOENT' })
 })
 
-test('preview resolves the email directory and exposes the effective permissions without writing', async t => {
+test('preview resolves the email directory and exposes the effective permissions without writing', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   delete f.config.rules[0]!.task.workspacePath
   f.config.rules[0]!.task.permissionPreset = 'danger-full-access'
@@ -392,8 +416,8 @@ test('preview resolves the email directory and exposes the effective permissions
   assert.equal(f.store.tasks().length, 0)
 })
 
-test('symlink aliases from email share the canonical workspace serialization key', async t => {
-  if (process.platform === 'win32') { t.skip('Creating directory symlinks requires Windows privileges'); return }
+test.skipIf(process.platform === 'win32')('symlink aliases from email share the canonical workspace serialization key', async () => {
+  await using t = new AsyncDisposableStack()
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   let runs = 0
@@ -415,7 +439,8 @@ test('symlink aliases from email share the canonical workspace serialization key
   assert.equal(runs, 2)
 })
 
-test('fixed-directory task records without the new selected-directory field still reopen', async t => {
+test('fixed-directory task records without the new selected-directory field still reopen', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery()); await f.finish()
   const { workspacePath: _selected, ...legacy } = f.store.tasks()[0]!
@@ -426,7 +451,8 @@ test('fixed-directory task records without the new selected-directory field stil
   assert.equal(taskWorkspace(reopened.tasks()[0]!), f.config.rules[0]!.task.workspacePath)
 })
 
-test('final notifications persist and include the Agent text independently of the summary', async t => {
+test('final notifications persist and include the Agent text independently of the summary', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t, { executor: { async validate() {}, async execute() {
     return { state: 'succeeded', summary: 'Checks completed.', reason: '', lastOutput: '分析完成：已修复两个问题，测试通过。' }
   } } })
@@ -439,7 +465,8 @@ test('final notifications persist and include the Agent text independently of th
   assert.ok(f.sent[0]!.outbox.text.includes(f.directory))
 })
 
-test('cancelled tasks send final notifications by default', async t => {
+test('cancelled tasks send final notifications by default', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t, { executor: { async validate() {}, async execute() {
     return { state: 'cancelled', summary: 'Cancelled.', reason: 'cancelled', lastOutput: 'Last completed output.' }
   } } })
@@ -449,7 +476,8 @@ test('cancelled tasks send final notifications by default', async t => {
   assert.match(f.sent[0]!.outbox.text, /Last completed output\./)
 })
 
-test('long Unicode output is explicitly shortened within the configured email byte limit', async t => {
+test('long Unicode output is explicitly shortened within the configured email byte limit', async () => {
+  await using t = new AsyncDisposableStack()
   const output = '最后结果。'.repeat(1_000)
   const f = await fixture(t, { executor: { async validate() {}, async execute() {
     return { state: 'succeeded', summary: 'Completed.', reason: '', lastOutput: output }
@@ -463,7 +491,8 @@ test('long Unicode output is explicitly shortened within the configured email by
   assert.equal(f.store.tasks()[0]?.lastOutput, output)
 })
 
-test('re-execution clears the previous Agent output before starting a new attempt', async t => {
+test('re-execution clears the previous Agent output before starting a new attempt', async () => {
+  await using t = new AsyncDisposableStack()
   const f = await fixture(t, { executor: { async validate() {}, async execute() {
     return { state: 'failed', summary: 'Failed.', reason: 'failed', lastOutput: 'Old attempt output.' }
   } } })

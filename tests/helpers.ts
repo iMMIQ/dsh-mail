@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Isolated real SQLite/domain fixtures shared by runtime and transport tests. */
-import type { TestContext } from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -39,10 +38,10 @@ export function configuration(directory: string): Config {
 }
 
 /** Owned resource stack closes sockets/workers before storage and directories. */
-export async function fixture(t: TestContext, override: Partial<RuntimeDependencies> = {}) {
+export async function fixture(t: AsyncDisposableStack, override: Partial<RuntimeDependencies> = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-mail-'))
   const cleanup: (() => Promise<unknown>)[] = [() => rm(directory, { recursive: true, force: true })]
-  t.after(async () => { for (const close of cleanup.reverse()) await close() })
+  t.defer(async () => { for (const close of cleanup.reverse()) await close() })
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(Storage)
