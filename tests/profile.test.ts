@@ -13,6 +13,8 @@ import { Config } from '../src/config.ts'
 import { configuration, message } from './helpers.ts'
 import { mailServers, waitFor } from './network.ts'
 
+const host = z.object({ version: z.string(), dependencies: z.record(z.string(), z.string()) }).parse(JSON.parse(await readFile(resolve('node_modules/@deepseek-ai/dsh/package.json'), 'utf8')))
+
 async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure'): Promise<void> {
   const success = scenario === 'success' || scenario === 'reconfigure'
   await using resources = new AsyncDisposableStack()
@@ -42,7 +44,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     'shell', 'user-approval', 'permission-presets', 'agent-preset-registry', 'agent-preset', 'credentials-local', 'commands']
   if (scenario === 'reconfigure') names.push('hmr')
   await writeFile(join(profile, 'package.json'), JSON.stringify({ name: 'dsh-mail-test-profile', private: true, type: 'module',
-    dependencies: { ...Object.fromEntries(names.map(name => [`@deepseek-ai/dsh-${name}`, '0.2.2-alpha.2'])), '@deepseek-ai/cordis-plugin-timer': '1.1.8-alpha.1', 'dsh-mail': `file:${resolve('.')}` }, dsh: { profile: { bundles: ['dsh-mail'] } } }))
+    dependencies: { ...Object.fromEntries(names.map(name => [`@deepseek-ai/dsh-${name}`, host.version])), '@deepseek-ai/cordis-plugin-timer': host.dependencies['@deepseek-ai/cordis-plugin-timer'], 'dsh-mail': `file:${resolve('.')}` }, dsh: { profile: { bundles: ['dsh-mail'] } } }))
   const original = configuration(join(root, 'spool'))
   const { workspacePath: _oldWorkspace, permissionPreset: _oldPermissions, ...emailTask } = original.rules[0]!.task
   const config = Config.parse({ ...original, rules: [{ ...original.rules[0]!, task: emailTask }] })

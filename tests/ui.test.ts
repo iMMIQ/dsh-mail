@@ -8,11 +8,11 @@ import { MailPageController, type MailPageApi } from '../src/client/controller.t
 import { configuration } from './helpers.ts'
 
 class Form implements ConfigForm<MailSettings> {
-  state: ConfigFormSnapshot<MailSettings>
+  state: ConfigFormSnapshot<MailSettings> & { mode: 'host' }
   listeners = new Set<() => void>()
   writes: unknown[] = []
   refuse = false
-  constructor() { this.state = { status: 'ready', value: settingsSchema.parse({ ...configuration('/tmp/mail-ui'), enabled: true }), base: {}, user: {}, revision: 1, writable: true } }
+  constructor() { this.state = { status: 'ready', mode: 'host', value: settingsSchema.parse({ ...configuration('/tmp/mail-ui'), enabled: true }), base: {}, user: {}, revision: 1, writable: true } }
   getSnapshot() { return this.state }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   async set(field: string, value: unknown) { return this.mutate([{ op: 'set', path: [field], value: JSON.parse(JSON.stringify(value)) }]) }
