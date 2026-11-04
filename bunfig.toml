@@ -3,4 +3,3 @@ registry = "https://registry.npmjs.org"
 
 [test]
 root = "./tests"
-timeout = 30000

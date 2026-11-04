@@ -1,22 +1,23 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-/** Strict Remote descriptors shared by the Host and browser across DSH 0.2 releases. */
+/** Strict metadata for the mail configuration page's two read-only Remote methods. */
 import { z } from 'zod'
+import { createTypertRemoteInfo } from '@deepseek-ai/dsh-typert-protocol/remote-info'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 
-/** The UI's two read-only endpoints; authorization codes use DSH's credential service. */
-export const TYPERT_REMOTE: TypertRemoteContribution = { package: 'dsh-mail', descriptors: [
-  { id: 'dsh-mail#mailAutomation/getStatus', service: 'mailAutomation', namespace: 'mailAutomation', method: 'getStatus',
-    invocation: { kind: 'direct' }, parameters: [], result: {
-      mode: 'strict', typeSymbol: 'dsh-mail#status', create: () => z.object({ phase: z.enum(['paused', 'running', 'changing', 'error']), health: z.record(z.string(), z.string()) }),
-    },
-  },
-  { id: 'dsh-mail#mailAutomation/checkConnection', service: 'mailAutomation', namespace: 'mailAutomation', method: 'checkConnection',
-    invocation: { kind: 'direct' }, parameters: [{ name: 'accountId', wire: 'accountId', source: 'json', codec: {
-      mode: 'strict', typeSymbol: 'dsh-mail#accountId', create: () => z.string().regex(/^[a-z][a-z0-9-]*$/),
-    } }], result: {
+const account = { mode: 'strict' as const, typeSymbol: 'dsh-mail#accountId', create: () => z.string().regex(/^[a-z][a-z0-9-]*$/) }
+
+/** Exact methods the UI can invoke; there is no credential read or mail-send endpoint. */
+export const TYPERT_REMOTE = createTypertRemoteInfo({ package: 'dsh-mail', methods: {
+  'mailAutomation/getStatus': { service: 'mailAutomation', invocation: { kind: 'direct' }, parameters: [], result: {
+    mode: 'strict', typeSymbol: 'dsh-mail#status', create: () => z.object({ phase: z.enum(['paused', 'running', 'changing', 'error']), health: z.record(z.string(), z.string()) }),
+  } },
+  'mailAutomation/checkConnection': { service: 'mailAutomation', invocation: { kind: 'direct' },
+    parameters: [{ name: 'accountId', source: 'json', codec: account, strictCodec: account }], result: {
       mode: 'strict', typeSymbol: 'dsh-mail#check', create: () => z.object({ imap: z.enum(['ok', 'failed', 'absent']), smtp: z.enum(['ok', 'failed', 'absent']) }),
     },
   },
-] }
+} }, z)
 
-export default TYPERT_REMOTE
+/** Consumer registration owned by the page's Cordis fiber. */
+const contribution: TypertRemoteContribution = { package: 'dsh-mail', get descriptors() { return TYPERT_REMOTE.descriptors } }
+export default contribution

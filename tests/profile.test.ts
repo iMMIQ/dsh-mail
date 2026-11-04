@@ -86,10 +86,15 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   }, () => `dsh ready; ${output}`)
   servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`).toString())
   await waitFor(() => servers.received.length === 1, () => `result mail; ${output}`)
-  if (success || scenario === 'model-error') assert.equal(await readFile(join(emailDirectory, 'evidence.txt'), 'utf8'), 'created by a real DSH tool call\n')
+  const response = await parseMail(servers.received[0]!, config.runtime)
+  const readResult = async (path: string): Promise<string> => {
+    try { return await readFile(path, 'utf8') }
+    catch (error) { throw new Error(`Missing fixture output ${path}\nReply: ${response.body}\nDSH: ${output}`, { cause: error }) }
+  }
+  if (success || scenario === 'model-error') assert.equal(await readResult(join(emailDirectory, 'evidence.txt')), 'created by a real DSH tool call\n')
   else await assert.rejects(readFile(join(emailDirectory, 'evidence.txt'), 'utf8'), { code: 'ENOENT' })
   await assert.rejects(readFile(join(root, 'evidence.txt'), 'utf8'), { code: 'ENOENT' })
-  const requests = z.array(z.object({ tools: z.array(z.string()), roles: z.array(z.string()) })).parse(JSON.parse(await readFile(join(root, 'requests.json'), 'utf8')))
+  const requests = z.array(z.object({ tools: z.array(z.string()), roles: z.array(z.string()) })).parse(JSON.parse(await readResult(join(root, 'requests.json'))))
   assert.equal(requests.length, success ? 3 : scenario === 'model-error' ? 2 : 1)
   assert.deepEqual(requests[0]!.tools, ['fixture_write', 'mail_task_result'])
   const logs = await readdir(join(root, 'sessions'), { recursive: true })
@@ -111,7 +116,6 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     approval: events.flatMap(event => { const parsed = approvalSchema.safeParse(event); return parsed.success ? [parsed.data.data.policy] : [] }).at(-1),
   }
   assert.equal(users.length, 1)
-  const response = await parseMail(servers.received[0]!, config.runtime)
   assert.equal(z.object({ cwd: z.string() }).parse(events[0]).cwd, emailDirectory)
   const actual = { input: users[0]!.data.content.map(part => part.text).join('').replace(emailDirectory, '{{workspace}}'), calls, turnEnds: ends, permissions,
     reply: response.body.replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(/Session: mail-[a-f0-9]{64}/, 'Session: {{sessionId}}').replace(emailDirectory, '{{workspace}}').trim() }

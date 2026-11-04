@@ -6,15 +6,15 @@ import { Context } from '@deepseek-ai/cordis'
 import { evaluatePluginCompatibility } from '@deepseek-ai/dsh-app-boot'
 import { TypertRegistry } from '@deepseek-ai/dsh-typert-registry'
 import { z } from 'zod'
-import remote from '../src/remote.ts'
+import remote, { TYPERT_REMOTE } from '../src/remote.ts'
 import { TYPERT } from '../src/typert.ts'
 
-test('DSH admits 0.2 prereleases and later releases while rejecting older hosts', async () => {
+test('DSH admits releases with the Remote helper and rejects earlier hosts', async () => {
   const manifest = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')))
-  for (const version of ['0.2.0-rc.1', '0.2.0', '0.2.1-alpha.1', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.9']) {
+  for (const version of ['0.2.1-alpha.3', '0.2.1-alpha.4', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.9']) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, version), undefined, version)
   }
-  for (const version of ['0.1.7-rc.2', '0.1.99']) assert.ok(evaluatePluginCompatibility(manifest, {}, version), version)
+  for (const version of ['0.1.7-rc.2', '0.2.0-rc.1', '0.2.0', '0.2.1-alpha.1', '0.2.1-alpha.2']) assert.ok(evaluatePluginCompatibility(manifest, {}, version), version)
 })
 
 test('the DSH registry admits both UI endpoints with strict parameter and result validation', async () => {
@@ -26,6 +26,9 @@ test('the DSH registry admits both UI endpoints with strict parameter and result
     const check = ctx.typert.remotes.get('mailAutomation/checkConnection')!
     assert.ok(check)
     assert.equal(ctx.typert.local.get('mailAutomation/checkConnection')?.id, check.id)
+    const input = TYPERT_REMOTE.methods['mailAutomation/checkConnection']!.input({ strict: true }).create()
+    assert.deepEqual(input.parse({ accountId: 'mail-1' }), { accountId: 'mail-1' })
+    assert.throws(() => input.parse({ accountId: 'mail-1', extra: true }))
     const parameter = check.parameters[0]!.codec
     assert.equal(parameter.mode, 'strict')
     if (parameter.mode !== 'strict') throw new Error('Expected strict account validation')

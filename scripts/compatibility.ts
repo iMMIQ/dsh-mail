@@ -15,10 +15,17 @@ const manifest = z.object({
 const response = await fetch(`https://registry.npmjs.org/@deepseek-ai%2Fdsh/${encodeURIComponent(version)}`)
 if (!response.ok) throw new Error(`Cannot read published DSH ${version}: HTTP ${response.status}`)
 const host = z.object({ version: z.literal(version), dependencies: z.record(z.string(), z.string()) }).parse(await response.json())
+// Each release uses its declared Cordis generation; later Loader prereleases can change its internal API.
+const overrides = Object.fromEntries(Object.entries(host.dependencies).filter(([name]) => name.startsWith('@deepseek-ai/cordis') || name === '@deepseek-ai/schemastery').map(([name, range]) => {
+  const exact = /^~?(\d+\.\d+\.\d+(?:-[\da-zA-Z.-]+)?)$/.exec(range)?.[1]
+  if (!exact) throw new Error(`Cannot select the release dependency for ${name}: ${range}`)
+  return [name, exact]
+}))
+manifest.overrides = overrides
 for (const name of new Set([...Object.keys(manifest.devDependencies), ...Object.keys(manifest.peerDependencies)])) {
   if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) manifest.devDependencies[name] = version
   if (name === '@deepseek-ai/cordis' || name === '@deepseek-ai/schemastery') {
-    const required = host.dependencies[name]
+    const required = overrides[name]
     if (!required) throw new Error(`DSH ${version} does not declare ${name}`)
     manifest.devDependencies[name] = required
   }
