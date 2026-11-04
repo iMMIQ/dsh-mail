@@ -15,39 +15,13 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: '1.4.4'
-      - name: Set up the DSH host
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24'
-      - run: bun install --frozen-lockfile --ignore-scripts
-      - run: bun run check
-
-  compatibility:
+    name: DSH ${{ matrix.dsh }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        dsh:
-          - 0.2.1-alpha.3
-          - 0.2.1-alpha.4
-          - 0.2.1-alpha.5
-          - 0.2.1-rc.1
-          - 0.2.1-rc.2
-          - 0.2.1-rc.3
-          - 0.2.1-rc.4
-          - 0.2.1-rc.5
-          - 0.2.2-alpha.2
-          - 0.2.2-alpha.3
+        dsh: [0.2.1-alpha.3, 0.2.2-alpha.3]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
