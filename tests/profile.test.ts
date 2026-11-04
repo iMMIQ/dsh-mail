@@ -72,8 +72,8 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     { id: 'fixture', name: resolve('tests/fixtures/driver.mjs'), config: { root, scenario } },
   ] }, { id: 'mail-automation', disabled: false, config }]
   await writeFile(join(profile, 'cordis.patch.yml'), dump(patches, { noRefs: true }))
-  const node = Bun.which('node')
-  if (!node) throw new Error('DSH requires a Node.js host; install Node.js >= 24.9')
+  const node = Bun.which(process.env.DSH_TEST_NODE ?? 'node')
+  if (!node) throw new Error('Install a Node.js host compatible with the selected DSH version')
   child = spawn(node, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'mail-test'],
     { cwd: resolve('.'), env: { ...process.env, DSH_HOME: home, MAIL_PASSWORD: 'testpass' }, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''

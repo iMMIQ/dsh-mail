@@ -6,15 +6,15 @@
 
 ## 安装
 
-需要 Bun ≥ 1.4.4、DSH ≥ `0.2.1-alpha.3`（首次提供 Remote 辅助接口的版本），以及已开启 IMAP/SMTP 的邮箱。DSH 宿主仍需 Node.js ≥ 24.9；项目的依赖管理、构建和测试使用 Bun。请先在 DSH 中配置好模型。当前从源码安装：
+需要 Bun ≥ 1.4.4、DSH ≥ `0.2.1-alpha.3`（首次提供 Remote 辅助接口的版本），以及已开启 IMAP/SMTP 的邮箱。Node.js 需处于官方维护期并满足所用 DSH 的要求。项目的依赖管理、构建和测试使用 Bun。请先安装相应 DSH 并配置好模型，再从源码安装：
 
 ```sh
 git clone https://github.com/iMMIQ/dsh-mail.git
 cd dsh-mail
 bun install --frozen-lockfile
 bun run build
-bun run dsh plugin --profile web add "$PWD"
-bun run dsh --profile web --no-open
+dsh plugin --profile web add "$PWD"
+dsh --profile web --no-open
 ```
 
 打开 DSH，进入 **插件 → 已安装 → dsh-mail → 包含的组件 → 配置**：
@@ -52,7 +52,7 @@ bun run check
 
 执行构建、类型检查和测试，无需真实邮箱或模型密钥。修改源码后重新构建并重启 DSH。
 
-CI 使用各版本配套的 Cordis 依赖，验证最低支持版与最新版的构建和全部测试。可用 `bun run test:compat 0.2.1-alpha.3` 在独立临时目录中验证指定版本。
+CI 保留最低支持版与最新版两个任务，使用各版本配套的 Cordis 依赖，在任务内检查符合要求的 Node 22、24、26。可用 `bun run test:compat 0.2.1-alpha.3` 验证指定 DSH；后面可追加多个 Node 可执行文件路径。
 
 ## 许可证
 

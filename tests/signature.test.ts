@@ -35,8 +35,8 @@ test('local DKIM accepts a real aligned whole-message signature and rejects tamp
   const raw = message()
   // DKIM DNS resolution runs in the same Node host as the installed DSH plugin.
   const verify = async (input: Buffer): Promise<void> => {
-    const node = Bun.which('node')
-    if (!node) throw new Error('DSH requires a Node.js host; install Node.js >= 24.9')
+    const node = Bun.which(process.env.DSH_TEST_NODE ?? 'node')
+    if (!node) throw new Error('Install a Node.js host compatible with the selected DSH version')
     const probe = Bun.spawn([node, 'tests/fixtures/verify-signature.mjs'], {
       stdin: new Response(JSON.stringify({ raw: input.toString('base64'), policy })).body,
       stdout: 'pipe',

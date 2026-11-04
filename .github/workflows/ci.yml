@@ -31,6 +31,15 @@ jobs:
           bun-version: '1.4.4'
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
+          node-version: '22'
+      - run: echo "DSH_NODE_22=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
           node-version: '24'
+      - run: echo "DSH_NODE_24=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26'
+      - run: echo "DSH_NODE_26=$(command -v node)" >> "$GITHUB_ENV"
       - run: bun install --frozen-lockfile --ignore-scripts
-      - run: bun run test:compat ${{ matrix.dsh }}
+      - run: bun run test:compat ${{ matrix.dsh }} "$DSH_NODE_22" "$DSH_NODE_24" "$DSH_NODE_26"

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Cordis bundle entry: persistent mail-triggered Workspace Sessions and result replies. */
 import { Service, type Context } from '@deepseek-ai/cordis'
+import { AsyncDisposableStack } from '@whatwg-node/disposablestack'
 import { open } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -31,7 +32,7 @@ export class MailAutomation extends TypertRemoteService {
   static Config = PluginConfig
   static inject = ['agents', 'agentDefaultModel', 'agentPresets', 'permissionPresets', 'sessionTitle', 'workspaceRegistry', 'sessions', 'sessionPersistence', 'tools', 'storageDomain', 'credentials', 'commands']
   private runtime: MailRuntime | undefined
-  private resources: AsyncDisposableStack | undefined
+  private resources: InstanceType<typeof AsyncDisposableStack> | undefined
   private changes: Promise<void> = Promise.resolve()
   private phase: MailStatus['phase'] = 'paused'
   private readonly shutdown = new AbortController()

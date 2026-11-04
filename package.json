@@ -7,7 +7,7 @@
   "license": "LGPL-3.0-or-later",
   "engines": {
     "bun": ">=1.4.4",
-    "node": ">=24.9.0",
+    "node": "^22.19.0 || ^24.0.0 || >=26.0.0",
     "dsh": ">=0.2.1-alpha.3"
   },
   "exports": {
@@ -72,6 +72,7 @@
     "test:compat": "bun run scripts/compatibility.ts"
   },
   "dependencies": {
+    "@whatwg-node/disposablestack": "0.1.0",
     "imapflow": "2.10.0",
     "js-yaml": "5.5.0",
     "mailauth": "8.0.4",
