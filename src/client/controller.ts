@@ -5,13 +5,13 @@ import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { MailSettings } from '../settings.ts'
-import type { Account } from '../config.ts'
+import type { Account, Rule } from '../config.ts'
 import type { MailStatus } from '../ui-types.ts'
 import type { ConnectionCheck } from '../check.ts'
 
 interface CredentialView { configured: boolean; writable: boolean }
 interface CredentialDraft extends CredentialView { text: string; remove: boolean; ready: boolean }
-type Notice = 'saved' | 'saveFailed' | 'credentialFailed' | 'conflict' | 'checkOk' | 'checkFailed'
+type Notice = 'saved' | 'saveFailed' | 'credentialFailed' | 'conflict' | 'checkOk' | 'checkFailed' | 'started' | 'activationFailed'
 /** Callbacks supplied by the registration closure; no component receives services. */
 export interface MailPageApi {
   describe(refs: string[]): Promise<RemoteResult<Record<string, CredentialView>>>
@@ -29,6 +29,9 @@ export interface MailPageState {
   credentials: Record<string, CredentialDraft>
   status: MailStatus | undefined
   checking: boolean
+  connecting: boolean
+  separateServers: boolean
+  checkAccountId: string
   check: ConnectionCheck | undefined
   toast: { id: number; message: Notice; success: boolean } | undefined
 }
@@ -38,11 +41,13 @@ export interface MailPageFace {
   selectAccount(id: string): void; selectRule(id: string): void
   addAccount(): void; removeAccount(): void; addRule(): void; removeRule(): void
   editAccount(field: string, text: string): void; editRule(field: string, text: string): void
+  editSetup(field: 'address' | 'server' | 'sender', text: string): void
+  setSeparateServers(separate: boolean): void
   editSetting(field: 'maxReplyBytes' | 'maxConcurrentTasks', text: string): void
   editCredential(ref: string, text: string): void; removeCredential(ref: string): void
   setEnabled(enabled: boolean): void
   watchStatus(): () => void
-  save(): void; discard(): void; checkConnection(): void; refresh(): void; dismissToast(): void
+  save(): void; start(): void; discard(): void; checkConnection(): void; refresh(): void; dismissToast(): void
 }
 
 function freshId(prefix: string, existing: readonly { id: string }[]): string {
@@ -56,19 +61,26 @@ function refs(value: MailSettings): string[] {
 function valid(value: MailSettings, fields: Record<string, string>): boolean {
   if (Object.entries(fields).some(([key, text]) => /(?:port|maxReplyBytes|maxConcurrentTasks|timeoutMs|maxSteps)$/.test(key) && (!/^\d+$/.test(text) || Number(text) < 1))) return false
   if (value.enabled && (!value.accounts.length || !value.rules.length)) return false
-  return value.accounts.every(account => z.email().safeParse(account.address).success && Boolean(account.receive || account.send) && [account.receive, account.send].every(connection => !connection || Boolean(connection.host.trim() && connection.auth.user.trim() && connection.port > 0 && connection.port <= 65535)))
+  return value.accounts.every(account => z.email().safeParse(account.address).success && Boolean(account.receive || account.send) && [account.receive, account.send].every(connection => !connection || Boolean(connection.host.trim() && !connection.host.includes('://') && connection.auth.user.trim() && connection.port > 0 && connection.port <= 65535
+      && (!connection.ca || connection.ca.includes('-----BEGIN CERTIFICATE-----') && !/-----BEGIN[^\n]*PRIVATE KEY-----/.test(connection.ca)))))
     && value.runtime.maxReplyBytes >= 1024
     && Object.values(value.senderPolicies).every(policy => policy.evidence !== 'trusted-mta' || policy.authservIds.length > 0)
     && value.rules.every(rule => value.accounts.some(account => account.id === rule.account && account.receive) && value.accounts.some(account => account.id === rule.reply.account && account.send) && rule.authorization.allowedSenders.length > 0
       && rule.authorization.allowedSenders.every(address => z.email().safeParse(address).success) && z.email().safeParse(rule.reply.to).success
-      && Boolean(value.senderPolicies[rule.authorization.policy]) && Boolean(value.templates[rule.task.template]?.trim()))
+      && Boolean((rule.task.agentPreset === undefined || rule.task.agentPreset.trim()) && rule.task.permissionPreset.trim()) && Boolean(value.senderPolicies[rule.authorization.policy]) && Boolean(value.templates[rule.task.template]?.trim()))
 }
 const split = (text: string): string[] => text.split(/[\s,;]+/).filter(Boolean)
+
+function makeAccount(id: string): Account {
+  const credentialRef = `DSH_MAIL_${crypto.randomUUID().replaceAll('-', '').toUpperCase()}`
+  return { id, address: '', receive: { protocol: 'imap', host: '', port: 993, tls: 'direct', auth: { user: '', credentialRef }, folders: ['INBOX'], initialSync: 'new-only', rescanIntervalMs: 60_000, maxMessageAgeMs: 172_800_000 },
+    send: { protocol: 'smtp', host: '', port: 465, tls: 'direct', auth: { user: '', credentialRef } } }
+}
 
 /** One controller per mounted browser plugin; all operations drain on disposal. */
 export class MailPageController {
   readonly store = createSnapshotStore<MailPageState>({ available: false, writable: false, dirty: false, invalid: false, saving: false, failed: false,
-    draft: undefined, accountId: '', ruleId: '', fields: {}, credentials: {}, status: undefined, checking: false, check: undefined, toast: undefined })
+    draft: undefined, accountId: '', ruleId: '', fields: {}, credentials: {}, status: undefined, checking: false, connecting: false, separateServers: false, checkAccountId: '', check: undefined, toast: undefined })
   private baseline: number | undefined
   private disposed = false
   private sequence = 0
@@ -104,27 +116,31 @@ export class MailPageController {
   private accept(): void {
     const snapshot = this.scope.getSnapshot()
     this.publish({ available: snapshot.status === 'ready', writable: snapshot.writable })
-    if (snapshot.status !== 'ready' || !snapshot.value || this.state().dirty || this.state().saving) return
+    if (snapshot.status !== 'ready' || !snapshot.value || this.state().dirty || this.state().saving || this.state().connecting) return
     this.baseline = snapshot.revision
     const draft = structuredClone(snapshot.value)
-    this.publish({ draft, accountId: draft.accounts.some(a => a.id === this.state().accountId) ? this.state().accountId : draft.accounts[0]?.id ?? '',
-      ruleId: draft.rules.some(r => r.id === this.state().ruleId) ? this.state().ruleId : draft.rules[0]?.id ?? '', fields: {}, failed: false })
+    const account = draft.accounts.find(a => a.id === this.state().accountId) ?? draft.accounts.find(a => a.receive) ?? draft.accounts[0]
+    this.publish({ draft, accountId: account?.id ?? '', separateServers: Boolean(account?.receive && account.send && account.receive.host !== account.send.host),
+      ruleId: draft.rules.find(r => r.id === this.state().ruleId && r.account === account?.id)?.id ?? draft.rules.find(r => r.account === account?.id)?.id ?? '', fields: {}, failed: false })
     this.run(() => this.refreshCredentials())
   }
   private edit(change: (draft: MailSettings) => void, field?: [string, string]): void {
-    if (this.state().saving || !this.state().writable || !this.state().draft) return
+    if (this.state().saving || this.state().connecting || !this.state().writable || !this.state().draft) return
     const draft = structuredClone(this.state().draft!)
     change(draft)
     this.checkRead++
     this.publish({ draft, dirty: true, failed: false, check: undefined, fields: field ? { ...this.state().fields, [field[0]]: field[1] } : this.state().fields })
   }
-  selectAccount(id: string): void { this.checkRead++; this.publish({ accountId: id, check: undefined }) }
-  selectRule(id: string): void { this.publish({ ruleId: id }) }
+  selectAccount(id: string): void {
+    const account = this.state().draft?.accounts.find(a => a.id === id)
+    this.checkRead++
+    this.publish({ accountId: id, check: undefined, separateServers: Boolean(account?.receive && account.send && account.receive.host !== account.send.host),
+      ruleId: this.state().draft?.rules.find(rule => rule.account === id)?.id ?? '', fields: Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => key !== 'setup-sender')) })
+  }
+  selectRule(id: string): void { this.publish({ ruleId: id, fields: Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => key !== 'setup-sender')) }) }
   addAccount(): void {
     const id = freshId('mail', this.state().draft?.accounts ?? [])
-    const credentialRef = `DSH_MAIL_${crypto.randomUUID().replaceAll('-', '').toUpperCase()}`
-    this.edit(draft => { draft.accounts.push({ id, address: '', receive: { protocol: 'imap', host: '', port: 993, tls: 'direct', auth: { user: '', credentialRef }, folders: ['INBOX'], initialSync: 'new-only', rescanIntervalMs: 60_000, maxMessageAgeMs: 172_800_000 },
-      send: { protocol: 'smtp', host: '', port: 465, tls: 'direct', auth: { user: '', credentialRef } } }) })
+    this.edit(draft => { draft.accounts.push(makeAccount(id)) })
     this.selectAccount(id)
     this.run(() => this.refreshCredentials())
   }
@@ -136,23 +152,57 @@ export class MailPageController {
     this.publish({ credentials: Object.fromEntries(Object.entries(this.state().credentials).filter(([ref]) => keep.has(ref))), fields: {} })
     this.selectAccount(this.state().draft?.accounts[0]?.id ?? '')
   }
-  addRule(): void {
-    const draft = this.state().draft
-    if (!draft?.accounts.length) return
+  private makeRule(draft: MailSettings, account: Account): Rule {
     const id = freshId('rule', [...draft.rules, ...Object.keys(draft.templates).map(id => ({ id }))])
-    const account = draft.accounts.find(value => value.id === this.state().accountId) ?? draft.accounts[0]!
-    this.edit(value => {
-      value.senderPolicies.signed ??= { evidence: 'local-signature' }
-      value.templates[id] = 'Execute this task in {{workspace}}.\nSubject: {{subject}}\n{{body}}\n{{attachmentText}}'
-      value.rules.push({ id, account: account.id, priority: 0, authorization: { policy: 'signed', allowedSenders: [] }, match: { subjectPrefix: '[DSH]' }, extract: {},
-        task: { agentPreset: 'minimal', permissionPreset: 'danger-full-access', template: id, timeoutMs: 900_000, maxSteps: 40, attachmentTypes: [] },
-        reply: { account: account.id, to: '', on: ['succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention'] } })
-    })
-    this.selectRule(id)
+    const policy = Object.keys(draft.senderPolicies).find(key => draft.senderPolicies[key]?.evidence === 'local-signature')
+      ?? freshId('signed', Object.keys(draft.senderPolicies).map(id => ({ id })))
+    draft.senderPolicies[policy] ??= { evidence: 'local-signature' }
+    draft.templates[id] = 'Execute this task in {{workspace}}.\nSubject: {{subject}}\n{{body}}\n{{attachmentText}}'
+    const rule: Rule = { id, account: account.id, priority: 0, authorization: { policy, allowedSenders: [] }, match: { subjectPrefix: '[DSH]' }, extract: {},
+      task: { permissionPreset: 'danger-full-access', template: id, timeoutMs: 900_000, maxSteps: 40, attachmentTypes: [] },
+      reply: { account: draft.accounts.find(a => a.id === account.id && a.send)?.id ?? draft.accounts.find(a => a.send)?.id ?? account.id, to: '', on: ['succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention'] } }
+    draft.rules.push(rule)
+    return rule
   }
-  removeRule(): void { const id = this.state().ruleId; this.edit(draft => { draft.rules = draft.rules.filter(rule => rule.id !== id) }); this.publish({ fields: {} }); this.selectRule(this.state().draft?.rules[0]?.id ?? '') }
+  addRule(): void {
+    let id = ''
+    this.edit(draft => { const account = draft.accounts.find(a => a.id === this.state().accountId) ?? draft.accounts[0]; if (account) id = this.makeRule(draft, account).id })
+    if (id) this.selectRule(id)
+  }
+  /** Fill the common mailbox and sender fields without requiring manual rule construction. */
+  editSetup(field: 'address' | 'server' | 'sender', text: string): void {
+    let accountId = this.state().accountId
+    let ruleId = this.state().ruleId
+    let created = false
+    this.edit(draft => {
+      let account = draft.accounts.find(a => a.id === accountId)
+      if (!account) { account = makeAccount(freshId('mail', draft.accounts)); draft.accounts.push(account); accountId = account.id; created = true }
+      const rule = account.receive ? draft.rules.find(r => r.id === ruleId && r.account === accountId) ?? draft.rules.find(r => r.account === accountId) ?? this.makeRule(draft, account) : undefined
+      ruleId = rule?.id ?? ''
+      if (field === 'address') { for (const connection of [account.receive, account.send]) if (connection && (!connection.auth.user || connection.auth.user === account.address)) connection.auth.user = text; account.address = text }
+      if (field === 'server') { const connection = account.receive ?? account.send; if (connection) connection.host = text; if (!this.state().separateServers && account.send) account.send.host = text }
+      if (field === 'sender' && rule) {
+        const previous = rule.authorization.allowedSenders[0]
+        rule.authorization.allowedSenders = split(text)
+        if (!rule.reply.to || rule.reply.to === previous) rule.reply.to = rule.authorization.allowedSenders[0] ?? ''
+      }
+    })
+    if (accountId !== this.state().accountId) this.selectAccount(accountId)
+    const reset = field === 'sender' ? [`rule.${ruleId}.allowedSenders`, `rule.${ruleId}.replyTo`]
+      : field === 'address' ? [`account.${accountId}.address`, `account.${accountId}.receive.user`, `account.${accountId}.send.user`]
+        : [`account.${accountId}.receive.host`, `account.${accountId}.send.host`]
+    const fields = Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => !reset.includes(key)))
+    this.publish({ ruleId, fields: field === 'sender' ? { ...fields, 'setup-sender': text } : fields })
+    if (created) this.run(() => this.refreshCredentials())
+  }
+  setSeparateServers(separate: boolean): void {
+    if (!separate) this.edit(draft => { const account = draft.accounts.find(a => a.id === this.state().accountId); if (account?.receive && account.send) account.send.host = account.receive.host })
+    this.publish({ separateServers: separate })
+  }
+  removeRule(): void { const id = this.state().ruleId; this.edit(draft => { draft.rules = draft.rules.filter(rule => rule.id !== id) }); this.publish({ fields: {} }); this.selectRule(this.state().draft?.rules.find(rule => rule.account === this.state().accountId)?.id ?? '') }
   editAccount(field: string, text: string): void {
     const id = this.state().accountId
+    let resetPort = false
     this.edit(draft => {
       const account = draft.accounts.find(value => value.id === id)
       if (!account) return
@@ -179,10 +229,17 @@ export class MailPageController {
       if (key === 'host') connection.host = text
       if (key === 'user') connection.auth.user = text
       if (key === 'port' && /^\d+$/.test(text)) connection.port = Number(text)
-      if (key === 'tls' && (text === 'direct' || text === 'starttls')) connection.tls = text
+      if (key === 'tls' && (text === 'direct' || text === 'starttls')) {
+        const direct = side === 'receive' ? 993 : 465
+        const starttls = side === 'receive' ? 143 : 587
+        if (connection.port === direct || connection.port === starttls) { connection.port = text === 'direct' ? direct : starttls; resetPort = true }
+        connection.tls = text
+      }
+      if (key === 'ca') { if (text.trim()) connection.ca = text; else delete connection.ca }
       if (key === 'folders' && side === 'receive' && account.receive) account.receive.folders = split(text)
     }, [`account.${id}.${field}`, text])
     if (field === 'mode') this.publish({ fields: Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => !key.startsWith(`account.${id}.`))) })
+    if (resetPort) this.publish({ fields: Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => key !== `account.${id}.${field.split('.')[0]}.port`)) })
     if (field === 'mode' || field === 'sharedCredential') this.run(() => this.refreshCredentials())
   }
   editRule(field: string, text: string): void {
@@ -195,7 +252,7 @@ export class MailPageController {
       else if (field === 'replyTo') rule.reply.to = text
       else if (field === 'allowedSenders') rule.authorization.allowedSenders = split(text)
       else if (field === 'subjectPrefix' || field === 'subjectContains' || field === 'bodyContains') { if (text) rule.match[field] = text; else delete rule.match[field] }
-      else if (field === 'agentPreset') rule.task.agentPreset = text
+      else if (field === 'agentPreset') { if (text.trim()) rule.task.agentPreset = text; else delete rule.task.agentPreset }
       else if (field === 'permissionPreset') rule.task.permissionPreset = text
       else if (field === 'timeoutMs' && /^\d+$/.test(text)) rule.task.timeoutMs = Number(text)
       else if (field === 'maxSteps' && /^\d+$/.test(text)) rule.task.maxSteps = Number(text)
@@ -206,6 +263,7 @@ export class MailPageController {
         ? { evidence: 'trusted-mta', authservIds: [], stripsUntrustedHeaders: true } : { evidence: 'local-signature' }
       else if (field === 'authservIds') { const policy = draft.senderPolicies[rule.authorization.policy]; if (policy?.evidence === 'trusted-mta') policy.authservIds = split(text) }
     }, [`rule.${id}.${field}`, text])
+    if (field === 'account') { this.selectAccount(text); this.selectRule(id) }
   }
   editSetting(field: 'maxReplyBytes' | 'maxConcurrentTasks', text: string): void {
     this.edit(draft => { if (/^\d+$/.test(text)) draft.runtime[field] = Number(text) }, [field, text])
@@ -213,12 +271,12 @@ export class MailPageController {
   setEnabled(enabled: boolean): void { this.edit(draft => { draft.enabled = enabled }) }
   editCredential(ref: string, text: string): void {
     const current = this.state().credentials[ref]
-    if (!current?.ready || !current.writable || this.state().saving) return
+    if (!current?.ready || !current.writable || this.state().saving || this.state().connecting) return
     this.publish({ credentials: { ...this.state().credentials, [ref]: { ...current, text, remove: false } }, dirty: true, failed: false })
   }
   removeCredential(ref: string): void {
     const current = this.state().credentials[ref]
-    if (!current?.ready || !current.writable || this.state().saving) return
+    if (!current?.ready || !current.writable || this.state().saving || this.state().connecting) return
     this.publish({ credentials: { ...this.state().credentials, [ref]: { ...current, text: '', remove: !current.remove } }, dirty: true, failed: false })
   }
   async refreshCredentials(): Promise<void> {
@@ -244,7 +302,11 @@ export class MailPageController {
   async refresh(): Promise<void> {
     if (this.disposed) return
     const generation = ++this.statusRead
-    try { const answer = await this.api.getStatus(); if (generation === this.statusRead) this.publish({ status: answer.ok ? answer.value : { phase: 'error', health: {} } }) }
+    try {
+      const answer = await this.api.getStatus()
+      if (generation !== this.statusRead) return
+      this.publish({ status: answer.ok ? answer.value : { phase: 'error', health: {} } })
+    }
     catch (_error) { if (generation === this.statusRead) this.publish({ status: { phase: 'error', health: {} } }) }
   }
   /** Poll only while a configuration page is visible, using the configured runtime cadence. */
@@ -300,7 +362,7 @@ export class MailPageController {
         }
       }
       this.publish({ dirty: false, fields: {}, credentials: {} })
-      this.notice('saved', true)
+      if (!this.state().connecting) this.notice('saved', true)
     } catch (_error) { this.publish({ failed: true }); this.notice(notice, false) }
     finally {
       this.publish({ saving: false })
@@ -309,9 +371,36 @@ export class MailPageController {
       await this.refresh()
     }
   }
+  /** Save while paused, verify every saved mailbox, then enable with the accepted revision. */
+  async start(): Promise<void> {
+    const state = this.state()
+    if (this.disposed || state.connecting || state.saving || state.checking || state.invalid || !state.writable || !state.draft?.accounts.length || !state.draft.rules.length) return
+    this.publish({ connecting: true, draft: { ...state.draft, enabled: false }, dirty: true, check: undefined })
+    try {
+      await this.save()
+      if (this.disposed || this.state().failed || this.state().dirty) return
+      if (this.state().status?.phase !== 'paused') { this.notice('activationFailed', false); return }
+      this.publish({ checking: true })
+      const generation = ++this.checkRead
+      for (const account of this.state().draft!.accounts) {
+        if (this.scope.getSnapshot().revision !== this.baseline) { this.publish({ failed: true }); this.notice('conflict', false); return }
+        this.publish({ checkAccountId: account.id, check: undefined })
+        const answer = await this.api.checkConnection(account.id)
+        if (this.disposed || generation !== this.checkRead) return
+        if (this.scope.getSnapshot().revision !== this.baseline) { this.publish({ failed: true }); this.notice('conflict', false); return }
+        if (!answer.ok) throw new Error('Connection check refused')
+        this.publish({ check: answer.value })
+        if (answer.value.imap === 'failed' || answer.value.smtp === 'failed') { this.notice('checkFailed', false); return }
+      }
+      this.publish({ checking: false, draft: { ...this.state().draft!, enabled: true }, dirty: true })
+      await this.save()
+      if (!this.disposed && !this.state().dirty && !this.state().failed) this.notice(this.state().status?.phase === 'running' ? 'started' : 'activationFailed', this.state().status?.phase === 'running')
+    } catch (_error) { this.notice('checkFailed', false) }
+    finally { this.publish({ checking: false, connecting: false }); if (!this.state().dirty) this.accept() }
+  }
   async checkConnection(): Promise<void> {
-    if (this.state().checking || this.state().dirty || !this.state().accountId) return
-    this.publish({ checking: true, check: undefined })
+    if (this.state().checking || this.state().connecting || this.state().dirty || !this.state().accountId) return
+    this.publish({ checking: true, check: undefined, checkAccountId: this.state().accountId })
     const generation = ++this.checkRead
     try {
       const account = this.state().accountId
@@ -327,9 +416,10 @@ export class MailPageController {
   face(): MailPageFace {
     return { hooks: { mailPage: this.store }, selectAccount: id => this.selectAccount(id), selectRule: id => this.selectRule(id),
       addAccount: () => this.addAccount(), removeAccount: () => this.removeAccount(), addRule: () => this.addRule(), removeRule: () => this.removeRule(),
+      editSetup: (field, text) => this.editSetup(field, text), setSeparateServers: separate => this.setSeparateServers(separate),
       editAccount: (field, text) => this.editAccount(field, text), editRule: (field, text) => this.editRule(field, text), editSetting: (field, text) => this.editSetting(field, text),
       editCredential: (ref, text) => this.editCredential(ref, text), removeCredential: ref => this.removeCredential(ref), setEnabled: enabled => this.setEnabled(enabled),
-      save: () => this.run(() => this.save()), discard: () => this.discard(), checkConnection: () => this.run(() => this.checkConnection()), refresh: () => this.run(async () => { await Promise.all([this.refresh(), this.refreshCredentials()]) }), watchStatus: () => this.watchStatus(),
+      save: () => this.run(() => this.save()), start: () => this.run(() => this.start()), discard: () => this.discard(), checkConnection: () => this.run(() => this.checkConnection()), refresh: () => this.run(async () => { await Promise.all([this.refresh(), this.refreshCredentials()]) }), watchStatus: () => this.watchStatus(),
       dismissToast: () => this.publish({ toast: undefined }) }
   }
   /** Stop subscriptions, erase authorization drafts, and drain admitted writes. */

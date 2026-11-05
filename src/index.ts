@@ -171,7 +171,7 @@ export class MailAutomation extends TypertRemoteService {
   @Remote
   async getStatus(): Promise<MailStatus> {
     await this.changes
-    return { phase: this.phase, health: Object.fromEntries(this.runtime?.health ?? []) }
+    return { phase: this.phase, health: Object.fromEntries(this.runtime?.health ?? []), defaultAgentPreset: this.ctx.agentPresets.defaultId }
   }
   /** Test saved IMAP/SMTP login without reading mail or sending a message.
    * @param accountId Saved account id.

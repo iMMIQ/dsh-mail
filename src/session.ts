@@ -26,7 +26,7 @@ declare module '@deepseek-ai/dsh-llm' {
 /** Creates and owns one root Agent per task, never importing agent-loop. */
 export class DshExecutor implements TaskExecutor {
   constructor(private readonly ctx: Context) {}
-  /** Resolve all configured presets before mail can create a Session. */
+  /** Validate the explicit or current default Agent preset before accepting mail. */
   async validate(rule: Rule): Promise<void> {
     this.ctx.permissionPresets.resolve(rule.task.permissionPreset)
     await this.ctx.agentPresets.resolve(rule.task.agentPreset)

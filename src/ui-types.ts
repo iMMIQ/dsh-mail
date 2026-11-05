@@ -3,4 +3,5 @@
 export interface MailStatus {
   phase: 'paused' | 'running' | 'changing' | 'error'
   health: Record<string, string>
+  defaultAgentPreset?: string
 }

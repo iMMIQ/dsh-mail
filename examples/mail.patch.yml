@@ -1,4 +1,4 @@
-# Install dsh-mail first. Edit addresses, paths and presets before enabling mail.
+# Install dsh-mail first. Edit addresses and paths before enabling mail.
 - id: mail-automation
   disabled: false
   config:
@@ -40,7 +40,6 @@
         match:
           subjectPrefix: '[DSH]'
         task:
-          agentPreset: minimal
           template: report
           timeoutMs: 900000
           maxSteps: 40

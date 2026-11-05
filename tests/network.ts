@@ -17,18 +17,18 @@ export async function waitFor(condition: () => boolean | Promise<boolean>, descr
 }
 
 /** Both servers require TLS and actual password authentication. */
-export async function mailServers(t: AsyncDisposableStack, submission: 'accept' | 'reject' | 'drop' = 'accept') {
+export async function mailServers(t: AsyncDisposableStack, submission: 'accept' | 'reject' | 'drop' = 'accept', login = { user: 'testuser', password: 'testpass' }) {
   const certificate = await selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
     keySize: 2048, algorithm: 'sha256', extensions: [{ name: 'basicConstraints', cA: true },
       { name: 'subjectAltName', altNames: [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }] }],
   })
-  const imap = hoodiecrow({ secureConnection: true, credentials: { key: certificate.private, cert: certificate.cert },
+  const imap = hoodiecrow({ secureConnection: true, credentials: { key: certificate.private, cert: certificate.cert }, users: { [login.user]: { password: login.password } },
     plugins: ['IDLE', 'ID', 'SASL-IR', 'AUTH-PLAIN'], storage: { INBOX: { messages: [] } } })
   const received: Buffer[] = []
   const smtpSockets = new Set<Socket>()
   const smtp = new SMTPServer({ secure: true, key: certificate.private, cert: certificate.cert,
     disabledCommands: ['STARTTLS'], authMethods: ['PLAIN', 'LOGIN'],
-    onAuth(auth, _session, callback) { callback(null, auth.username === 'testuser' && auth.password === 'testpass' ? { user: 'testuser' } : undefined) },
+    onAuth(auth, _session, callback) { callback(null, auth.username === login.user && auth.password === login.password ? { user: login.user } : undefined) },
     onData(stream, _session, callback) {
       const chunks: Buffer[] = []
       stream.on('data', chunk => chunks.push(Buffer.from(chunk)))

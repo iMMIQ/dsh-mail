@@ -37,7 +37,7 @@ export const senderPolicySchema = z.discriminatedUnion('evidence', [
   }),
 ])
 
-/** One deterministic routing rule; values entering a task are frozen at admission. */
+/** One routing rule; omitted Agent and model selections follow DSH at execution. */
 export const ruleSchema = z.strictObject({
   id, priority: z.number().int().default(0), account: id,
   authorization: z.strictObject({ policy: id, allowedSenders: z.array(address).min(1) }),
@@ -50,7 +50,7 @@ export const ruleSchema = z.strictObject({
   })).default({}),
   task: z.strictObject({
     workspacePath: z.string().refine(isAbsolute, 'workspacePath must be absolute').optional(),
-    agentPreset: line, permissionPreset: line.default('danger-full-access'), template: id,
+    agentPreset: line.optional(), permissionPreset: line.default('danger-full-access'), template: id,
     timeoutMs: ms.default(900_000), maxSteps: z.number().int().positive().default(40),
     attachmentTypes: z.array(z.enum(['text/plain', 'text/csv', 'application/json'])).default([]),
     model: z.strictObject({ provider: line, model: line, maxTokens: z.number().int().positive().optional() }).optional(),
@@ -107,7 +107,7 @@ export const Config = z.strictObject({
 export type Config = z.output<typeof Config>
 /** Mailbox connection and sending identity. */
 export type Account = z.output<typeof accountSchema>
-/** Frozen rule used by one task. */
+/** Routing options persisted with each task. */
 export type Rule = z.output<typeof ruleSchema>
 /** Explicit accepted authentication evidence. */
 export type SenderPolicy = z.output<typeof senderPolicySchema>

@@ -1,6 +1,6 @@
 # 配置
 
-常用设置可在 DSH 的 **插件 → 已安装 → dsh-mail → 包含的组件 → 配置** 中编辑，包括邮箱、授权码、触发规则、结果收件人和任务参数。首次安装默认暂停，保存邮箱和规则后开启接收。授权码写入 DSH 凭据存储，不写入普通配置，也不会回显；环境变量提供的只读凭据需要在宿主环境中修改。
+在 DSH 的 **插件 → 已安装 → dsh-mail → 包含的组件 → 配置** 中填写邮箱地址、邮件服务器、密码和允许的发件邮箱，再点击“保存并启用”。页面自动建立任务规则，并在收发连接检查通过后启用；结果默认回信到第一个允许的发件邮箱。首次安装处于暂停状态，其他选项折叠显示。密码写入 DSH 凭据存储，不写入普通配置，也不会回显；环境变量提供的只读凭据需要在宿主环境中修改。
 
 需要手动配置时，从 [mail.patch.yml](../examples/mail.patch.yml) 复制本机配置，通过 `--patch` 加载，或写入 profile 的 `cordis.patch.yml`。插件行的 `id` 为 `mail-automation`；profile 补丁替换整段 `config`，不会逐字段合并。`enabled: false` 暂停收发和任务执行。启动参数覆盖的字段可能在 UI 中只读。
 
@@ -10,12 +10,12 @@
 - `accounts[].id`：账户名称，供规则引用。
 - `accounts[].address`：该账户的邮箱地址。
 - `receive` / `send`：分别配置 IMAP 和 SMTP；一个账户可仅用于收信或发信。
-- `host`、`port`、`tls`：按服务商填写。`direct` 表示直接 TLS，`starttls` 表示 STARTTLS；证书必须可信。
+- `host`、`port`、`tls`：按服务商填写。`direct` 表示直接 TLS，`starttls` 表示 STARTTLS；证书必须可信。内部 CA 的 PEM 公钥证书可填入 `ca`，也可在 UI 的服务器选项中粘贴。
 - `auth.user`、`auth.credentialRef`：登录名和 DSH 凭据名称。密码通过 DSH 凭据来源提供，不写入补丁。
 
 多个邮箱分别使用不同的 `id` 和凭据名称。收信账户默认监听 `INBOX`，首次启动只建立基线，不执行历史邮件；`receive.initialSync: all` 可在首次建立游标时扫描历史邮件，仍受邮件年龄限制。默认最大邮件年龄为两天，重新启动不会重置游标。
 
-示例通过环境变量 `MAIL_PASSWORD` 提供邮箱授权码；也可以使用已有的 DSH 凭据存储。示例中的 `minimal` Agent preset 和默认的 `danger-full-access` 权限 preset 必须存在于所选 profile。
+示例通过环境变量 `MAIL_PASSWORD` 提供邮箱授权码；也可以使用已有的 DSH 凭据存储。示例沿用 DSH 当前默认 Agent 模式和模型；默认的 `danger-full-access` 权限 preset 必须存在于所选 profile。
 
 ## 发件人验证
 
@@ -51,11 +51,11 @@ senderPolicies:
 | --- | --- |
 | `authorization.allowedSenders` | 允许触发任务的发件地址 |
 | `match` | `subjectPrefix`、`subjectContains`、`bodyContains`、`to`、`hasAttachments` |
-| `task.agentPreset` | 执行任务的 Agent preset |
+| `task.agentPreset` | 可选；省略时在每次任务启动时读取 DSH 当前默认 Agent preset，填写时固定使用该预设 |
 | `task.permissionPreset` | 默认 `danger-full-access`，完整访问、无需审批；可显式改为其他权限 preset |
 | `task.template` | 引用 `templates` 中的任务模板 |
 | `task.timeoutMs` / `task.maxSteps` | 默认 15 分钟、40 步 |
-| `task.model` | 可选的 `provider`、`model` 和 `maxTokens`；未设置时沿用 DSH 当前模型 |
+| `task.model` | 可选的 `provider`、`model` 和 `maxTokens`；未设置时在任务启动时沿用 DSH 当前模型选择与参数 |
 | `task.attachmentTypes` | 允许传给任务的附件类型，默认不传附件 |
 | `reply.account` / `reply.to` | 发信账户和固定的结果收件地址 |
 | `reply.on` | 默认通知 `succeeded`、`failed`、`cancelled`、`timed_out` 和 `needs_attention` |

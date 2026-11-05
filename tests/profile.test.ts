@@ -46,7 +46,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   await writeFile(join(profile, 'package.json'), JSON.stringify({ name: 'dsh-mail-test-profile', private: true, type: 'module',
     dependencies: { ...Object.fromEntries(names.map(name => [`@deepseek-ai/dsh-${name}`, host.version])), '@deepseek-ai/cordis-plugin-timer': host.dependencies['@deepseek-ai/cordis-plugin-timer'], 'dsh-mail': `file:${resolve('.')}` }, dsh: { profile: { bundles: ['dsh-mail'] } } }))
   const original = configuration(join(root, 'spool'))
-  const { workspacePath: _oldWorkspace, permissionPreset: _oldPermissions, ...emailTask } = original.rules[0]!.task
+  const { workspacePath: _oldWorkspace, permissionPreset: _oldPermissions, agentPreset: _oldPreset, ...emailTask } = original.rules[0]!.task
   const config = Config.parse({ ...original, rules: [{ ...original.rules[0]!, task: emailTask }] })
   const emailDirectory = join(root, 'email-workspace')
   await mkdir(emailDirectory)
@@ -116,6 +116,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     approval: events.flatMap(event => { const parsed = approvalSchema.safeParse(event); return parsed.success ? [parsed.data.data.policy] : [] }).at(-1),
   }
   assert.equal(users.length, 1)
+  assert.equal(z.object({ cwd: z.string(), agentPreset: z.string() }).parse(events[0]).agentPreset, 'mail-reader')
   assert.equal(z.object({ cwd: z.string() }).parse(events[0]).cwd, emailDirectory)
   const actual = { input: users[0]!.data.content.map(part => part.text).join('').replace(emailDirectory, '{{workspace}}'), calls, turnEnds: ends, permissions,
     reply: response.body.replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(/Session: mail-[a-f0-9]{64}/, 'Session: {{sessionId}}').replace(emailDirectory, '{{workspace}}').trim() }
