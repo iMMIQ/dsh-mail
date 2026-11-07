@@ -20,11 +20,13 @@ export async function pop3Server(resources: AsyncDisposableStack, mode: 'direct'
   const commands: { name: string; argument: string; secure: boolean }[] = []
   const sockets = new Set<Socket>()
   let scans = 0
-  const behavior = { uidl: true, stls: true, stall: '', drop: '', duplicate: false, fragment: false }
+  let handshakeSeen = false
+  const behavior = { uidl: true, stls: true, stall: '', drop: '', duplicate: false, fragment: false,
+    greeting: '+OK test mailbox\r\n', responses: {} as Partial<Record<string, Buffer>>, endResponse: '', stallHandshake: false }
   const own = (socket: Socket): void => { sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket)) }
   const bind = (socket: Socket, secure: boolean, greeting: boolean): void => {
     own(socket)
-    if (greeting) socket.write('+OK test mailbox\r\n')
+    if (greeting) socket.write(behavior.greeting)
     let input = ''
     let user = ''
     let authenticated = false
@@ -41,10 +43,19 @@ export async function pop3Server(resources: AsyncDisposableStack, mode: 'direct'
         commands.push({ name, argument: name === 'PASS' ? '[redacted]' : argument, secure })
         if (behavior.stall === name) return
         if (behavior.drop === name) { socket.destroy(); return }
+        const response = behavior.responses[name]
+        if (response) {
+          if (behavior.endResponse === name) socket.end(response)
+          else socket.write(response)
+          continue
+        }
         if (name === 'STLS' && !secure) {
           if (!behavior.stls) { socket.write('-ERR STLS unavailable\r\n'); continue }
           socket.removeListener('data', onData)
-          socket.write('+OK Begin TLS\r\n', () => bind(new TLSSocket(socket, { isServer: true, secureContext: context }), true, false))
+          socket.write('+OK Begin TLS\r\n', () => {
+            if (behavior.stallHandshake) socket.on('data', () => { handshakeSeen = true })
+            else bind(new TLSSocket(socket, { isServer: true, secureContext: context }), true, false)
+          })
           return
         }
         if (name === 'QUIT') { socket.end('+OK Bye\r\n'); return }
@@ -84,5 +95,5 @@ export async function pop3Server(resources: AsyncDisposableStack, mode: 'direct'
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve() }) })
   const address = server.address()
   assert.ok(address && typeof address !== 'string')
-  return { port: address.port, ca: certificate.cert, messages, commands, behavior, sockets, scans: () => scans, mode }
+  return { port: address.port, ca: certificate.cert, messages, commands, behavior, sockets, scans: () => scans, handshakeSeen: () => handshakeSeen, mode }
 }

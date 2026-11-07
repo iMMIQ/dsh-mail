@@ -1,0 +1,327 @@
+diff --git a/dist/src/Connection.d.ts b/dist/src/Connection.d.ts
+index c4dc3b5f7047a1035d20637dda5ececd98fdf50e..81b931e2c6899209dd2aee2ce82665705421472f 100644
+--- a/dist/src/Connection.d.ts
++++ b/dist/src/Connection.d.ts
+@@ -31,7 +31,12 @@ declare class Pop3Connection extends EventEmitter<any> {
+     timeout: number | undefined;
+     _socket: Socket | _tls.TLSSocket | null;
+     _stream: Readable | null;
+-    _streamAtLineStart: boolean;
++    /** Maximum unstuffed bytes per multiline response. */
++    maxResponseSize: number;
++    /** Upgrade TLS after STLS acceptance; uses tlsOptions and servername. */
++    STLS(): Promise<void>;
++    /** Interrupt commands and streams, then await every socket close. */
++    close(error?: Error): Promise<void>;
+     _command: string;
+     _pendingResponseBuffer: Buffer<ArrayBuffer>;
+     tlsOptions: _tls.TlsOptions;
+diff --git a/src/Connection.js b/src/Connection.js
+index c5c6c13214d262f6dda3ff5f6a25e4d0d4af6acd..84c9bf826ce54b79c25aed309b9279532178234d 100644
+--- a/src/Connection.js
++++ b/src/Connection.js
+@@ -1,13 +1,11 @@
+-import {Socket} from 'net';
++import {Socket, isIP} from 'net';
+ import _tls from 'tls';
+-import {EventEmitter} from 'events';
++import {EventEmitter, once} from 'events';
+ import {Readable} from 'stream';
+ 
+ import {
+   CRLF,
+   CRLF_BUFFER,
+-  TERMINATOR_BUFFER,
+-  TERMINATOR_BUFFER_ARRAY,
+   MULTI_LINE_COMMAND_NAME,
+   MAYBE_MULTI_LINE_COMMAND_NAME
+ } from './constant.js';
+@@ -47,11 +45,16 @@ class Pop3Connection extends EventEmitter {
+     this.timeout = timeout;
+     this._socket = null;
+     this._stream = null;
+-    this._streamAtLineStart = true;
++    this.maxResponseSize = Infinity;
++    this._responseBytes = 0;
++    this._bodyBuffer = Buffer.alloc(0);
++    this._sockets = new Set();
++    this._closed = [];
++    this._shutdown = new AbortController();
+     this._command = '';
+     this._pendingResponseBuffer = Buffer.concat([]);
+     this.tlsOptions = tlsOptions || {};
+-    this.servername = servername || host;
++    this.servername = servername ?? (isIP(host) ? undefined : host);
+   }
+ 
+   /**
+@@ -75,10 +78,10 @@ class Pop3Connection extends EventEmitter {
+         //
+       }
+     });
+-    // A fresh stream always begins at a line boundary (right after the
+-    //   response's info line), so the short terminator forms ('.\r\n'
+-    //   and '.') are valid here; see `_pushStream`.
+-    this._streamAtLineStart = true;
++    // Keep stream errors observable even before command() returns the stream.
++    this._stream.on('error', () => {});
++    this._bodyBuffer = Buffer.alloc(0);
++    this._responseBytes = 0;
+     return this._stream;
+   }
+ 
+@@ -87,37 +90,35 @@ class Pop3Connection extends EventEmitter {
+    * @returns {void}
+    */
+   _pushStream (buffer) {
+-    // The full '\r\n.\r\n' form carries its own preceding line break, so
+-    //   it unambiguously marks a terminator wherever it lands. The short
+-    //   forms ('.\r\n' and '.') omit that line break because some servers
+-    //   split it into an earlier chunk whose trailing CRLF was already
+-    //   pushed to the stream; they are only trustworthy when this chunk
+-    //   is known to start a new line. Without that guard, a chunk that
+-    //   coincidentally *is* just "." or ".\r\n" in the middle of real
+-    //   body content (e.g., a lone "." from an arbitrary TCP/TLS
+-    //   fragmentation boundary) would end the stream early, and the next,
+-    //   still-legitimate body chunk would then be misread as a fresh
+-    //   top-level response (see node-pop3 issue about corrupted -ERR
+-    //   messages during RETR).
+-    if (
+-      TERMINATOR_BUFFER.equals(buffer) ||
+-      (this._streamAtLineStart &&
+-        TERMINATOR_BUFFER_ARRAY.slice(1).some(
+-          (_buffer) => _buffer.equals(buffer)
+-        ))
+-    ) {
+-      this._endStream();
+-      return;
+-    }
+-    const endBuffer = buffer.subarray(-5);
+-    if (endBuffer.equals(TERMINATOR_BUFFER)) {
+-      /** @type {Readable} */ (this._stream).push(buffer.subarray(0, -5));
+-      this._endStream();
+-      return;
++    this._bodyBuffer = Buffer.concat([this._bodyBuffer, buffer]);
++    for (;;) {
++      const end = this._bodyBuffer.indexOf(CRLF_BUFFER);
++      if (end < 0) break;
++      let line = this._bodyBuffer.subarray(0, end + 2);
++      this._bodyBuffer = this._bodyBuffer.subarray(end + 2);
++      if (end === 1 && line[0] === 46) {
++        if (this._bodyBuffer.length) {
++          void this.close(Object.assign(new Error('Unexpected data after response'), {eventName: 'bad-server-response'}));
++        } else {
++          this._endStream();
++        }
++        return;
++      }
++      if (line[0] === 46) {
++        if (line[1] !== 46) {
++          void this.close(Object.assign(new Error('Invalid dot stuffing'), {eventName: 'invalid-dot-stuffing'}));
++          return;
++        }
++        line = line.subarray(1);
++      }
++      this._responseBytes += line.length;
++      if (this._responseBytes > this.maxResponseSize) break;
++      this._stream.push(line);
+     }
+-    /** @type {Readable} */ (this._stream).push(buffer);
+-    if (buffer.length) {
+-      this._streamAtLineStart = buffer.at(-1) === 10; // '\n'
++    // Allow one stuffed dot and an incomplete CRLF, or a response terminator.
++    if (this._responseBytes > this.maxResponseSize ||
++        this._bodyBuffer.length > Math.max(3, this.maxResponseSize - this._responseBytes + 3)) {
++      void this.close(Object.assign(new Error('Response exceeds byte limit'), {eventName: 'response-too-large'}));
+     }
+   }
+ 
+@@ -127,12 +128,47 @@ class Pop3Connection extends EventEmitter {
+    */
+   _endStream (err) {
+     if (this._stream) {
+-      this._stream.push(null);
++      if (err) this._stream.destroy(err);
++      else this._stream.push(null);
+     }
+     this._stream = null;
+     this.emit('end', err);
+   }
+ 
++  /** Upgrade an authorized STLS response before sending credentials.
++   * @returns {Promise<void>}
++   */
++  async STLS () {
++    await this.command('STLS');
++    const socket = this._socket;
++    this._detachSocket();
++    this._socket = _tls.connect({host: this.host, ...this.tlsOptions, socket, servername: this.servername});
++    this._trackSocket(this._socket);
++    this._bindSocket(this._socket);
++    await once(this._socket, 'secureConnect', {signal: this._shutdown.signal});
++    this.tls = true;
++  }
++
++  /** Destroy this session and await all socket close events.
++   * @param {Error} [error] Failure delivered to pending commands and streams.
++   * @returns {Promise<void>}
++   */
++  async close (error = Object.assign(new Error('Connection closed'), {eventName: 'close'})) {
++    this._shutdown.abort(error);
++    this.emit('error', error);
++    this._endStream(error);
++    for (const socket of this._sockets) socket.destroy();
++    await Promise.all(this._closed);
++  }
++
++  _trackSocket (socket) {
++    this._sockets.add(socket);
++    this._closed.push(new Promise(resolve => socket.once('close', () => {
++      this._sockets.delete(socket);
++      resolve();
++    })));
++  }
++
+   /**
+    * @returns {Promise<void>}
+    */
+@@ -168,6 +204,8 @@ class Pop3Connection extends EventEmitter {
+           this.emit('warn', e);
+         }
+         if (settled) {
++          this.emit('error', e);
++          this._endStream(e);
+           return;
+         }
+         settled = true;
+@@ -238,13 +276,7 @@ class Pop3Connection extends EventEmitter {
+         this._socket = socket;
+       }
+ 
+-      this._socket.on(
+-        'data',
+-        /**
+-         * @param {Buffer} buffer
+-         * @returns {void}
+-         */
+-        (buffer) => {
++      const onData = (buffer) => {
+           if (this._stream) {
+             this._pushStream(buffer);
+             return;
+@@ -255,6 +287,11 @@ class Pop3Connection extends EventEmitter {
+             this._pendingResponseBuffer = Buffer.concat([]);
+           }
+ 
++          const statusEnd = buffer.indexOf(CRLF_BUFFER);
++          if (statusEnd > 512 || (statusEnd < 0 && buffer.length > 513)) {
++            void this.close(Object.assign(new Error('Status line exceeds byte limit'), {eventName: 'response-too-large'}));
++            return;
++          }
+           if (buffer[0] === 45 || buffer[0] === 43) {
+             const firstLineEndIndex = buffer.indexOf(CRLF_BUFFER);
+             if (firstLineEndIndex === -1) {
+@@ -263,7 +300,7 @@ class Pop3Connection extends EventEmitter {
+             }
+           }
+ 
+-          if (buffer[0] === 45) { // '-'
++          if (/^-ERR(?: |\r)/.test(buffer.toString('latin1', 0, 5))) {
+             const err =
+               /**
+                * @type {Error & {eventName: "error", command: string|undefined}}
+@@ -271,7 +308,7 @@ class Pop3Connection extends EventEmitter {
+                 // @ts-expect-error It's ok
+                 new Error(buffer.subarray(5, buffer.indexOf(CRLF_BUFFER)))
+               );
+-            err.eventName = 'error';
++            err.eventName = 'command-rejected';
+             // https://github.com/node-pop3/node-pop3/issues/37
+             err.command = this._command.startsWith('PASS ')
+               ? 'PASS ***'
+@@ -279,7 +316,7 @@ class Pop3Connection extends EventEmitter {
+             this.emit('error', err);
+             return;
+           }
+-          if (buffer[0] === 43) { // '+'
++          if (/^\+OK(?: |\r)/.test(buffer.toString('latin1', 0, 4))) {
+             const firstLineEndIndex = buffer.indexOf(CRLF_BUFFER);
+             const infoBuffer = buffer.subarray(4, firstLineEndIndex);
+             const [commandName, msgNumber] = (
+@@ -292,10 +329,14 @@ class Pop3Connection extends EventEmitter {
+               this._updateStream();
+               stream = this._stream;
+               const bodyBuffer = buffer.subarray(firstLineEndIndex + 2);
+-              if (bodyBuffer[0]) {
++              if (bodyBuffer.length) {
+                 this._pushStream(bodyBuffer);
+               }
+             }
++            if (!stream && buffer.length !== firstLineEndIndex + 2) {
++              void this.close(Object.assign(new Error('Unexpected data after status'), {eventName: this._command === 'STLS' ? 'unexpected-data-before-tls' : 'bad-server-response'}));
++              return;
++            }
+             this.emit('response', infoBuffer.toString(), stream);
+             safeResolve();
+             return;
+@@ -308,9 +349,8 @@ class Pop3Connection extends EventEmitter {
+             );
+           err.eventName = 'bad-server-response';
+           safeReject(err);
+-        }
+-      );
+-      this._socket.on('error', (err) => {
++      };
++      const onError = (err) => {
+         err.eventName = 'error';
+         if (this._stream) {
+           this.emit('error', err);
+@@ -318,23 +358,33 @@ class Pop3Connection extends EventEmitter {
+         }
+         safeReject(err);
+         this._socket = null;
+-      });
+-      this._socket.once('close', () => {
++      };
++      const onClose = () => {
+         const err = /** @type {Error & {eventName: "close"}} */ (
+           new Error('close')
+         );
+         err.eventName = 'close';
+         safeReject(err);
+         this._socket = null;
+-      });
+-      this._socket.once('end', () => {
++      };
++      const onEnd = () => {
+         const err = /** @type {Error & {eventName: "end"}} */ (
+           new Error('end')
+         );
+         err.eventName = 'end';
+         safeReject(err);
+         this._socket = null;
+-      });
++      };
++      this._bindSocket = (target) => {
++        const handlers = {data: onData, error: onError, close: onClose, end: onEnd};
++        for (const [event, handler] of Object.entries(handlers)) target.on(event, handler);
++        this._detachSocket = () => {
++          for (const [event, handler] of Object.entries(handlers)) target.off(event, handler);
++        };
++      };
++      this._trackSocket(socket);
++      if (this._socket !== socket) this._trackSocket(this._socket);
++      this._bindSocket(this._socket);
+       socket.connect({
+         host,
+         port
+@@ -348,7 +398,8 @@ class Pop3Connection extends EventEmitter {
+    * @returns {Promise<[string, Readable|null]>}
+    */
+   async command (...args) {
+-    this._command = args.join(' ').trim();
++    this._command = args.join(' ');
++    if (/[\r\n\0]/.test(this._command)) throw Object.assign(new Error('Invalid command'), {eventName: 'invalid-command'});
+     if (!this._hasActiveSocket()) {
+       throw new Error('no-socket');
+     }

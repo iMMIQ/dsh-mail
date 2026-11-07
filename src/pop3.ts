@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-/** Bounded POP3 wire reads preserve MIME octets for DKIM, including dot unstuffing. */
-import { once } from 'node:events'
-import { connect, isIP, type Socket } from 'node:net'
-import { connect as connectTls, type TLSSocket } from 'node:tls'
+/** POP3 policy over node-pop3: command deadlines, cancellation and validated listings. */
+import Pop3 from 'node-pop3'
 import type { Account } from './config.ts'
 import { MailError } from './types.ts'
 
@@ -10,60 +8,38 @@ type Reception = Extract<NonNullable<Account['receive']>, { protocol: 'pop3' }>
 
 /** One sequential TLS session; close() interrupts reads and awaits socket disposal. */
 export class Pop3Connection {
-  private socket: Socket | TLSSocket
-  private reader: AsyncIterator<Buffer>
-  private buffered: Buffer = Buffer.alloc(0)
-  private readonly sockets = new Set<Socket>()
-  private readonly closed: Promise<void>[] = []
-  private readonly abort = (): void => { this.socket.destroy(new MailError('pop3-cancelled', true)) }
-  private constructor(private readonly receive: Reception, private readonly timeoutMs: number, private readonly signal: AbortSignal) {
-    this.socket = receive.tls === 'direct' ? connectTls(this.tlsOptions()) : connect({ host: receive.host, port: receive.port })
-    this.own(this.socket)
-    this.reader = this.socket.iterator({ destroyOnReturn: false })
+  private readonly client: Pop3
+  private readonly abort = (): void => { void this.client.close(new MailError('pop3-cancelled', true)) }
+  private constructor(receive: Reception, password: string, private readonly timeoutMs: number, private readonly signal: AbortSignal) {
+    this.client = new Pop3({ host: receive.host, port: receive.port, tls: receive.tls === 'direct',
+      user: receive.auth.user, password, parseStreamToString: false,
+      tlsOptions: { rejectUnauthorized: true, ...receive.ca ? { ca: receive.ca } : {} } })
+    // Operations own failure reporting, including failures between command responses.
+    this.client.on('error', () => {})
     signal.addEventListener('abort', this.abort, { once: true })
-    if (signal.aborted) this.abort()
   }
-  private tlsOptions() {
-    return { host: this.receive.host, port: this.receive.port, rejectUnauthorized: true,
-      ...!isIP(this.receive.host) ? { servername: this.receive.host } : {}, ...this.receive.ca ? { ca: this.receive.ca } : {} }
-  }
-  private own(socket: Socket): void {
-    this.sockets.add(socket)
-    // Reads observe socket errors; this listener also covers gaps between commands.
-    socket.on('error', () => {})
-    this.closed.push(new Promise<void>(resolve => socket.once('close', () => { this.sockets.delete(socket); resolve() })))
-  }
-  private async bounded<T>(read: () => Promise<T>): Promise<T> {
+  private async bounded<T>(operation: () => Promise<T>, maxBytes = 512): Promise<T> {
     this.signal.throwIfAborted()
-    const timer = setTimeout(() => this.socket.destroy(new MailError('pop3-timeout', true)), this.timeoutMs)
-    try { return await read() } finally { clearTimeout(timer) }
-  }
-  private async line(limit: number): Promise<Buffer> {
-    for (;;) {
-      const end = this.buffered.indexOf('\r\n')
-      if (end >= 0) {
-        if (end > limit) throw new MailError('pop3-response-too-large')
-        const line = this.buffered.subarray(0, end)
-        this.buffered = this.buffered.subarray(end + 2)
-        return line
-      }
-      if (this.buffered.length > limit + 1) throw new MailError('pop3-response-too-large')
-      const next = await this.reader.next()
-      if (next.done) throw new MailError('pop3-disconnected', true)
-      this.buffered = Buffer.concat([this.buffered, next.value])
-    }
-  }
-  private async status(): Promise<void> {
-    const line = (await this.line(512)).toString('latin1')
-    if (/^\+OK(?: |$)/.test(line)) return
-    if (/^-ERR(?: |$)/.test(line)) throw new MailError('pop3-command-rejected')
-    throw new MailError('pop3-invalid-response')
-  }
-  private async command(command: string): Promise<void> {
-    if (/[\r\n\0]/.test(command)) throw new MailError('pop3-invalid-command')
-    if (this.socket.destroyed) throw new MailError('pop3-disconnected', true)
-    this.socket.write(`${command}\r\n`)
-    await this.status()
+    this.client.maxResponseSize = maxBytes
+    let timeout: MailError | undefined
+    const timer = setTimeout(() => {
+      timeout = new MailError('pop3-timeout', true)
+      void this.client.close(timeout)
+    }, this.timeoutMs)
+    try { return await operation() }
+    catch (error) {
+      if (timeout) throw timeout
+      if (this.signal.aborted) throw new MailError('pop3-cancelled', true)
+      if (error instanceof MailError) throw error
+      const event = error && typeof error === 'object' && 'eventName' in error ? error.eventName : undefined
+      if (event === 'response-too-large') throw new MailError('pop3-response-too-large')
+      if (event === 'command-rejected') throw new MailError('pop3-command-rejected')
+      if (event === 'invalid-command') throw new MailError('pop3-invalid-command')
+      if (event === 'invalid-dot-stuffing') throw new MailError('pop3-invalid-dot-stuffing')
+      if (event === 'unexpected-data-before-tls') throw new MailError('pop3-unexpected-data-before-tls')
+      if (event === 'bad-server-response') throw new MailError('pop3-invalid-response')
+      throw new MailError('pop3-disconnected', true)
+    } finally { clearTimeout(timer) }
   }
   /** Establish TLS before credentials; a refused STLS command never falls back to cleartext.
    * @param receive Validated POP3 server settings.
@@ -73,43 +49,25 @@ export class Pop3Connection {
    * @returns Authenticated session, owned by the caller until close().
    */
   static async open(receive: Reception, password: string, timeoutMs: number, signal: AbortSignal): Promise<Pop3Connection> {
-    const client = new Pop3Connection(receive, timeoutMs, signal)
+    const connection = new Pop3Connection(receive, password, timeoutMs, signal)
     try {
-      await client.bounded(async () => {
-        await once(client.socket, receive.tls === 'direct' ? 'secureConnect' : 'connect')
-        await client.status()
-        if (receive.tls === 'starttls') {
-          await client.command('STLS')
-          if (client.buffered.length) throw new MailError('pop3-unexpected-data-before-tls')
-          await client.reader.return?.()
-          client.socket = connectTls({ ...client.tlsOptions(), socket: client.socket })
-          client.own(client.socket)
-          client.reader = client.socket.iterator({ destroyOnReturn: false })
-          await once(client.socket, 'secureConnect')
-        }
-        await client.command(`USER ${receive.auth.user}`)
-        await client.command(`PASS ${password}`)
+      await connection.bounded(async () => {
+        await connection.client.connect()
+        if (receive.tls === 'starttls') await connection.client.STLS()
+        await connection.client.command('USER', receive.auth.user)
+        await connection.client.command('PASS', password)
       })
-      return client
-    } catch (error) { await client.close(); throw error }
+      return connection
+    } catch (error) { await connection.close(); throw error }
   }
-  private async multiline(command: string, maxBytes: number): Promise<Buffer> {
+  private multiline(command: string, maxBytes: number): Promise<Buffer> {
     return this.bounded(async () => {
-      await this.command(command)
+      const [, stream] = await this.client.command(command)
+      if (!stream) throw new MailError('pop3-invalid-response')
       const chunks: Buffer[] = []
-      let size = 0
-      for (;;) {
-        let line = await this.line(Math.max(1, maxBytes - size + 1))
-        if (line.length === 1 && line[0] === 46) return Buffer.concat(chunks, size)
-        if (line[0] === 46) {
-          if (line[1] !== 46) throw new MailError('pop3-invalid-dot-stuffing')
-          line = line.subarray(1)
-        }
-        size += line.length + 2
-        if (size > maxBytes) throw new MailError('pop3-response-too-large')
-        chunks.push(line, Buffer.from('\r\n'))
-      }
-    })
+      for await (const chunk of stream) chunks.push(chunk)
+      return Buffer.concat(chunks)
+    }, maxBytes)
   }
   /** Fetch stable UIDLs and advertised sizes; malformed or duplicate listings stop this scan.
    * @param maxBytes Byte limit applied separately to each server listing.
@@ -137,18 +95,17 @@ export class Pop3Connection {
       return { number, uid, size }
     }).sort((a, b) => a.number - b.number)
   }
-  /** Retrieve original MIME bytes; exceeding the cap requires closing this connection.
+  /** Retrieve original MIME bytes; exceeding the cap closes this connection.
    * @param number Message number valid only during this session.
    * @param maxBytes Maximum decoded POP3 message size.
    * @returns Dot-unstuffed MIME bytes with original CRLF line endings.
    */
   retrieve(number: number, maxBytes: number): Promise<Buffer> { return this.multiline(`RETR ${number}`, maxBytes) }
   /** End a successful scan without issuing DELE. */
-  async quit(): Promise<void> { await this.bounded(() => this.command('QUIT')) }
+  async quit(): Promise<void> { await this.bounded(async () => { await this.client.command('QUIT') }) }
   /** Interrupt in-flight work and wait for every socket, including a wrapped STLS socket. */
   async close(): Promise<void> {
     this.signal.removeEventListener('abort', this.abort)
-    for (const socket of this.sockets) socket.destroy()
-    await Promise.all(this.closed)
+    await this.client.close()
   }
 }

@@ -55,7 +55,7 @@ for (const name of new Set([...Object.keys(manifest.devDependencies), ...Object.
 await using resources = new AsyncDisposableStack()
 const directory = await mkdtemp(join(tmpdir(), 'dsh-mail-compat-'))
 resources.defer(() => rm(directory, { recursive: true, force: true }))
-await Promise.all(['src', 'tests', 'scripts', 'examples', 'cordis.patch.yml', 'bunfig.toml', 'tsconfig.json', 'tsconfig.client.json', 'tsconfig.check.json']
+await Promise.all(['src', 'tests', 'scripts', 'examples', 'patches', 'cordis.patch.yml', 'bunfig.toml', 'tsconfig.json', 'tsconfig.client.json', 'tsconfig.check.json']
   .map(name => cp(join(source, name), join(directory, name), { recursive: true })))
 await writeFile(join(directory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 

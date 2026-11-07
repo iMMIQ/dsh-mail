@@ -38,6 +38,7 @@
     "cordis.patch.yml",
     "README.md",
     "examples",
+    "patches",
     "docs",
     "src",
     "tsconfig.json",
@@ -78,6 +79,7 @@
     "mailauth": "8.0.4",
     "mailparser": "3.14.1",
     "markdown-it": "15.0.3",
+    "node-pop3": "0.15.3",
     "nodemailer": "10.3.1",
     "proper-lockfile": "4.1.2",
     "sanitize-html": "2.18.1",
@@ -162,5 +164,8 @@
   "bugs": {
     "url": "https://github.com/iMMIQ/dsh-mail/issues"
   },
-  "packageManager": "bun@1.4.4"
+  "packageManager": "bun@1.4.4",
+  "patchedDependencies": {
+    "node-pop3@0.15.3": "patches/node-pop3@0.15.3.patch"
+  }
 }

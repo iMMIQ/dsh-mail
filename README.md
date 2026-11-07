@@ -58,6 +58,8 @@ bun run check
 
 执行构建、类型检查和测试，无需真实邮箱或模型密钥。修改源码后重新构建并重启 DSH。
 
+POP3 使用 `node-pop3` 的 ESM 入口。`patches/` 中的 Bun 补丁提供 STLS、原始字节流修正、响应大小限制和连接关闭接口，由 `bun install` 自动应用；升级依赖时需保留这些能力并运行 POP3 测试。
+
 CI 保留最低支持版与最新版两个任务，使用各版本配套的 Cordis 依赖，在任务内检查符合要求的 Node 24、26。可用 `bun run test:compat 0.2.2-alpha.2` 验证指定 DSH；后面可追加多个 Node 可执行文件路径。
 
 ## 许可证

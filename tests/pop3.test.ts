@@ -114,6 +114,80 @@ test('POP3 never sends credentials after STLS rejection or an untrusted certific
   assert.ok(!server.commands.some(command => ['USER', 'PASS'].includes(command.name)))
 })
 
+for (const mode of ['direct', 'starttls'] as const) {
+  test(`POP3 ${mode} owner cancellation closes an idle authenticated connection`, async () => {
+    await using resources = new AsyncDisposableStack()
+    const server = await pop3Server(resources, mode)
+    const controller = new AbortController()
+    const client = await Pop3Connection.open(reception(server), 'testpass', 2_000, controller.signal)
+    resources.defer(() => client.close())
+    controller.abort()
+    await waitFor(() => server.sockets.size === 0, () => 'cancelled POP3 socket drained')
+    await assert.rejects(client.list(4096))
+  })
+}
+
+for (const greeting of ['+OKAY invalid\r\n', `+OK ${'x'.repeat(513)}`]) {
+  test('POP3 rejects malformed or oversized greetings before authentication', async () => {
+    await using resources = new AsyncDisposableStack()
+    const server = await pop3Server(resources)
+    server.behavior.greeting = greeting
+    await assert.rejects(Pop3Connection.open(reception(server), 'testpass', 2_000, new AbortController().signal),
+      { code: greeting.startsWith('+OKAY') ? 'pop3-invalid-response' : 'pop3-response-too-large' })
+    assert.equal(server.commands.length, 0)
+  })
+}
+
+test('POP3 refuses extra plaintext after STLS acceptance and never sends credentials', async () => {
+  await using resources = new AsyncDisposableStack()
+  const server = await pop3Server(resources, 'starttls')
+  server.behavior.responses.STLS = Buffer.from('+OK Begin TLS\r\nunexpected plaintext')
+  await assert.rejects(Pop3Connection.open(reception(server), 'testpass', 2_000, new AbortController().signal), { code: 'pop3-unexpected-data-before-tls' })
+  assert.deepEqual(server.commands.map(command => command.name), ['STLS'])
+})
+
+test('POP3 rejects multiline credential injection without exposing the password', async () => {
+  await using resources = new AsyncDisposableStack()
+  const server = await pop3Server(resources)
+  await assert.rejects(Pop3Connection.open(reception(server), 'secret\r\nDELE 1', 2_000, new AbortController().signal), error => {
+    assert.ok(error instanceof Error)
+    assert.ok(!error.message.includes('secret'))
+    assert.equal('code' in error && error.code, 'pop3-invalid-command')
+    return true
+  })
+  assert.ok(!server.commands.some(command => ['PASS', 'DELE'].includes(command.name)))
+})
+
+for (const cancel of [false, true]) {
+  test(`POP3 STLS handshake ${cancel ? 'cancellation' : 'timeout'} settles open and drains the socket`, async () => {
+    await using resources = new AsyncDisposableStack()
+    const server = await pop3Server(resources, 'starttls')
+    server.behavior.stallHandshake = true
+    const controller = new AbortController()
+    const opening = assert.rejects(Pop3Connection.open(reception(server), 'testpass', cancel ? 5_000 : 1_000, controller.signal),
+      { code: cancel ? 'pop3-cancelled' : 'pop3-timeout' })
+    await waitFor(() => server.handshakeSeen(), () => 'TLS ClientHello received')
+    if (cancel) controller.abort()
+    await opening
+    await waitFor(() => server.sockets.size === 0, () => 'failed TLS handshake drained')
+    assert.ok(!server.commands.some(command => ['USER', 'PASS'].includes(command.name)))
+  })
+}
+
+for (const end of [false, true]) {
+  test(`POP3 ${end ? 'disconnect' : 'timeout'} during RETR rejects incomplete MIME and drains the socket`, async () => {
+    await using resources = new AsyncDisposableStack()
+    const server = await pop3Server(resources)
+    server.behavior.responses.RETR = Buffer.from('+OK message follows\r\npartial MIME\r\n')
+    server.behavior.endResponse = end ? 'RETR' : ''
+    const client = await Pop3Connection.open(reception(server), 'testpass', 1_000, new AbortController().signal)
+    resources.defer(() => client.close())
+    await assert.rejects(client.retrieve(1, 4096), { code: end ? 'pop3-disconnected' : 'pop3-timeout' })
+    await client.close()
+    await waitFor(() => server.sockets.size === 0, () => 'incomplete POP3 socket drained')
+  })
+}
+
 for (const behavior of ['stall', 'drop'] as const) {
   test(`POP3 ${behavior} during a command terminates within its deadline`, async () => {
     await using resources = new AsyncDisposableStack()
