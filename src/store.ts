@@ -7,7 +7,7 @@ import lockfile from 'proper-lockfile'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain, DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
-import { inboxSchema, taskSchema, type InboxRecord, type TaskRecord, type MailStore } from './types.ts'
+import { inboxSchema, taskSchema, type InboxRecord, type TaskRecord, type MailStore, type MailId, type TaskId } from './types.ts'
 
 /** Version one is the first released plugin-owned format. */
 export const mailDomain = defineDomain({
@@ -23,10 +23,15 @@ export class DomainMailStore implements MailStore {
   private constructor(private readonly domain: Domain<typeof mailDomain>) {}
   /** Open the declared domain; callers must close after workers drain. */
   static async open(facility: DomainFacility): Promise<DomainMailStore> { return new DomainMailStore(await facility.open(mailDomain)) }
+  getInbox(id: MailId): InboxRecord | undefined { return this.domain.table('inbox').get(id) }
+  getTask(id: TaskId): TaskRecord | undefined { return this.domain.table('tasks').get(id) }
+  get inboxCount(): number { return this.domain.table('inbox').size }
+  get taskCount(): number { return this.domain.table('tasks').size }
   inbox(): readonly InboxRecord[] { return [...this.domain.table('inbox').entries()].map(([, v]) => v) }
   tasks(): readonly TaskRecord[] { return [...this.domain.table('tasks').entries()].map(([, v]) => v) }
   putInbox(record: InboxRecord): Promise<void> { return this.domain.table('inbox').put(record.id, record) }
   putTask(record: TaskRecord): Promise<void> { return this.domain.table('tasks').put(record.id, record) }
+  updateTask(id: TaskId, update: (record: TaskRecord) => TaskRecord): Promise<TaskRecord> { return this.domain.table('tasks').update(id, update) }
   cursor(key: string): { validity: string; high: number } | undefined { return this.domain.table('cursors').get(key) }
   putCursor(key: string, value: { validity: string; high: number }): Promise<void> { return this.domain.table('cursors').put(key, value) }
   close(): Promise<void> { return this.domain.close() }

@@ -132,7 +132,7 @@ test('temporary SMTP rejection retries only frozen notification content', async 
   await using t = new AsyncDisposableStack()
   const content: string[] = []
   const f = await fixture(t, { async send(task) {
-    content.push(JSON.stringify(task.outbox.text))
+    content.push(JSON.stringify(task.text))
     return content.length === 1 ? { state: 'failed', retryable: true, reason: 'smtp-450' } : { state: 'accepted' }
   } })
   await f.runtime.admit(f.delivery()); await f.finish()
@@ -459,10 +459,10 @@ test('final notifications persist and include the Agent text independently of th
   await f.runtime.admit(f.delivery()); await f.finish()
   const task = f.store.tasks()[0]!
   assert.equal(task.lastOutput, '分析完成：已修复两个问题，测试通过。')
-  assert.match(f.sent[0]!.outbox.text, /Summary:\nChecks completed\./)
-  assert.match(f.sent[0]!.outbox.text, /Agent last output:\n分析完成/)
-  assert.ok(f.sent[0]!.outbox.text.includes(task.sessionId))
-  assert.ok(f.sent[0]!.outbox.text.includes(f.directory))
+  assert.match(f.sent[0]!.text, /Summary:\nChecks completed\./)
+  assert.match(f.sent[0]!.text, /Agent last output:\n分析完成/)
+  assert.ok(f.sent[0]!.text.includes(task.sessionId))
+  assert.ok(f.sent[0]!.text.includes(f.directory))
 })
 
 test('cancelled tasks send final notifications by default', async () => {
@@ -472,8 +472,8 @@ test('cancelled tasks send final notifications by default', async () => {
   } } })
   await f.runtime.admit(f.delivery()); await f.finish()
   assert.equal(f.sent.length, 1)
-  assert.match(f.sent[0]!.outbox.text, /Status: cancelled/)
-  assert.match(f.sent[0]!.outbox.text, /Last completed output\./)
+  assert.match(f.sent[0]!.text, /Status: cancelled/)
+  assert.match(f.sent[0]!.text, /Last completed output\./)
 })
 
 test('long Unicode output is explicitly shortened within the configured email byte limit', async () => {
@@ -484,7 +484,7 @@ test('long Unicode output is explicitly shortened within the configured email by
   } } })
   f.config.runtime.maxReplyBytes = 1_024
   await f.runtime.admit(f.delivery()); await f.finish()
-  const text = f.sent[0]!.outbox.text
+  const text = f.sent[0]!.text
   assert.ok(Buffer.byteLength(text) <= 1_024)
   assert.match(text, /Email shortened/)
   assert.doesNotMatch(text, /\uFFFD/)
@@ -499,4 +499,42 @@ test('re-execution clears the previous Agent output before starting a new attemp
   await f.runtime.admit(f.delivery()); await f.finish()
   await f.runtime.retryTask(f.store.tasks()[0]!.id)
   assert.equal(f.store.tasks()[1]?.lastOutput, '')
+})
+
+test('an atomic task update failure blocks execution and reports the unavailable store', async () => {
+  await using resources = new AsyncDisposableStack()
+  const f = await fixture(resources)
+  f.store.updateTask = async () => { throw new Error('Fixture storage unavailable') }
+  await f.runtime.admit(f.delivery()); await f.finish()
+  assert.equal(f.store.tasks()[0]?.state, 'queued')
+  assert.equal(f.executed.length, 0)
+  assert.equal(f.sent.length, 0)
+  assert.deepEqual(f.reports, ['mail-runtime-blocked'])
+  assert.equal(z.object({ blocked: z.boolean() }).parse(f.runtime.status()).blocked, true)
+})
+
+test('shutdown drains an admitted atomic update before releasing task ownership', async () => {
+  await using resources = new AsyncDisposableStack()
+  const f = await fixture(resources)
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  resources.defer(() => release.resolve())
+  const update = f.store.updateTask.bind(f.store)
+  let first = true
+  f.store.updateTask = async (id, transform) => {
+    if (first) { first = false; entered.resolve(); await release.promise }
+    return update(id, transform)
+  }
+  await f.runtime.admit(f.delivery())
+  await f.runtime.tick()
+  await entered.promise
+  let closed = false
+  const close = f.runtime.close().then(() => { closed = true })
+  await Promise.resolve()
+  assert.equal(closed, false)
+  release.resolve()
+  await close
+  assert.equal(closed, true)
+  assert.equal(f.store.tasks()[0]?.state, 'needs_attention')
+  assert.equal(f.executed.length, 0)
 })

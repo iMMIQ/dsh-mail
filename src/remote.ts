@@ -3,17 +3,18 @@
 import { z } from 'zod'
 import { createTypertRemoteInfo } from '@deepseek-ai/dsh-typert-protocol/remote-info'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
+import { mailStatusSchema, connectionCheckSchema } from './ui-types.ts'
 
 const account = { mode: 'strict' as const, typeSymbol: 'dsh-mail#accountId', create: () => z.string().regex(/^[a-z][a-z0-9-]*$/) }
 
 /** Exact methods the UI can invoke; there is no credential read or mail-send endpoint. */
 export const TYPERT_REMOTE = createTypertRemoteInfo({ package: 'dsh-mail', methods: {
   'mailAutomation/getStatus': { service: 'mailAutomation', invocation: { kind: 'direct' }, parameters: [], result: {
-    mode: 'strict', typeSymbol: 'dsh-mail#status', create: () => z.object({ phase: z.enum(['paused', 'running', 'changing', 'error']), health: z.record(z.string(), z.string()), defaultAgentPreset: z.string().min(1).optional() }),
+    mode: 'strict', typeSymbol: 'dsh-mail#status', create: () => mailStatusSchema,
   } },
   'mailAutomation/checkConnection': { service: 'mailAutomation', invocation: { kind: 'direct' },
     parameters: [{ name: 'accountId', source: 'json', codec: account, strictCodec: account }], result: {
-      mode: 'strict', typeSymbol: 'dsh-mail#check', create: () => z.object({ imap: z.enum(['ok', 'failed', 'absent']), smtp: z.enum(['ok', 'failed', 'absent']) }),
+      mode: 'strict', typeSymbol: 'dsh-mail#check', create: () => connectionCheckSchema,
     },
   },
 } }, z)

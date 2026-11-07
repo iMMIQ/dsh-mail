@@ -6,7 +6,7 @@
 
 ## 安装
 
-需要 Bun ≥ 1.4.4、DSH ≥ `0.2.1-alpha.3`（首次提供 Remote 辅助接口的版本），以及已开启 IMAP 或 POP3 收信及 SMTP 发信的邮箱。Node.js 需处于官方维护期并满足所用 DSH 的要求。项目的依赖管理、构建和测试使用 Bun。请先安装相应 DSH 并配置好模型，再从源码安装：
+需要 Bun ≥ 1.4.4、DSH 0.2.x（最低 `0.2.2-alpha.2`），以及已开启 IMAP 或 POP3 收信及 SMTP 发信的邮箱。Node.js 最低为 24.9.0，需处于官方维护期并满足所用 DSH 的要求；Node 22 和 DSH 0.2.1 及更早版本不受支持。项目的依赖管理、构建和测试使用 Bun。请先安装相应 DSH 并配置好模型，再从源码安装：
 
 ```sh
 git clone https://github.com/iMMIQ/dsh-mail.git
@@ -58,7 +58,7 @@ bun run check
 
 执行构建、类型检查和测试，无需真实邮箱或模型密钥。修改源码后重新构建并重启 DSH。
 
-CI 保留最低支持版与最新版两个任务，使用各版本配套的 Cordis 依赖，在任务内检查符合要求的 Node 22、24、26。可用 `bun run test:compat 0.2.1-alpha.3` 验证指定 DSH；后面可追加多个 Node 可执行文件路径。
+CI 保留最低支持版与最新版两个任务，使用各版本配套的 Cordis 依赖，在任务内检查符合要求的 Node 24、26。可用 `bun run test:compat 0.2.2-alpha.2` 验证指定 DSH；后面可追加多个 Node 可执行文件路径。
 
 ## 许可证
 

@@ -2,7 +2,7 @@
 /** Guided internal-mail setup with optional connection and automation controls. */
 import { Button, SettingsForm, SettingsValueField, SettingsSecretField, Switch, Tag, Toast, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useState } from 'react'
-import { z } from 'zod'
+import { validIntegerText } from '../config-schema.ts'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MailPageFace } from './controller.ts'
 import type { MailLocaleKey } from './locales.ts'
@@ -31,23 +31,14 @@ export function MailPage(props: PageProps) {
   const disabled = !state.writable || state.saving || state.connecting
   const primaryConnection = account?.receive ?? account?.send
   const password = primaryConnection ? state.credentials[primaryConnection.auth.credentialRef] : undefined
-  const passwordReady = (ref: string): boolean => {
-    const value = state.credentials[ref]
-    return Boolean(value?.ready && (value.text || value.configured && !value.remove))
-  }
-  const credentialsReady = Boolean(draft?.accounts.length) && (draft?.accounts.every(value => [value.receive, value.send].every(connection => !connection || passwordReady(connection.auth.credentialRef))) ?? false)
-  const incomplete: string[] = []
-  if (!account?.address || !z.email().safeParse(account.address).success) incomplete.push(t('address'))
-  if (!primaryConnection?.host.trim()) incomplete.push(t('mailServer'))
-  if (!credentialsReady) incomplete.push(t('password'))
-  if (!rule?.authorization.allowedSenders.length || !rule.authorization.allowedSenders.every(value => z.email().safeParse(value).success)) incomplete.push(t('yourAddress'))
+  const incomplete = state.incomplete.map(key => t(key))
   const ready = incomplete.length === 0 && Boolean(rule) && !state.invalid
   const running = state.status?.phase === 'running'
   const pausing = running && draft?.enabled === false
   const subject = [rule?.match.subjectPrefix, rule?.match.subjectContains, t('exampleSubject')].filter(Boolean).join(' ')
   const field = (id: string, label: MailLocaleKey, value: string | number, edit: (text: string) => void, numeric = false, hint?: string) => (
     <div key={id} className="mail-field"><SettingsValueField id={`dsh-mail-${id}`} label={t(label)} text={state.fields[id] ?? String(value)} numeric={numeric}
-      disabled={disabled} invalid={numeric && state.fields[id] !== undefined && (!/^\d+$/.test(state.fields[id]!) || Number(state.fields[id]) < 1)}
+      disabled={disabled} invalid={numeric && state.fields[id] !== undefined && !validIntegerText(state.fields[id]!)}
       {...hint ? { hint } : {}} invalidLabel={t('invalid')} overridden={false} overriddenLabel={t('overridden')} resetLabel={t('reset')} onEdit={edit} onReset={() => edit(String(value))} /></div>
   )
   const accountField = (key: string, label: MailLocaleKey, value: string | number, numeric = false, hint?: string) => field(`account.${account!.id}.${key}`, label, value, text => props.editAccount(key, text), numeric, hint)

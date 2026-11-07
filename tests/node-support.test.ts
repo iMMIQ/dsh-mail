@@ -15,17 +15,17 @@ const schedule = {
 }
 
 test('Node eligibility follows DSH requirements and the release lifecycle', () => {
-  const required = '^22.19.0 || >=24.0.0'
-  for (const version of ['22.19.0', '24.0.0', 'v26.13.0']) assert.equal(nodeSupportReason(version, required, schedule, '2026-11-04'), undefined)
-  for (const version of ['20.19.0', '22.18.0', '25.0.0', '27.0.0-alpha.1', '27.0.0']) assert.ok(nodeSupportReason(version, required, schedule, '2026-11-04'), version)
+  const required = '^24.9.0 || >=26.0.0'
+  for (const version of ['24.9.0', '24.22.2', 'v26.13.0']) assert.equal(nodeSupportReason(version, required, schedule, '2026-11-04'), undefined)
+  for (const version of ['20.19.0', '22.19.0', '24.8.0', '25.0.0', '27.0.0-alpha.1', '27.0.0']) assert.ok(nodeSupportReason(version, required, schedule, '2026-11-04'), version)
   assert.ok(nodeSupportReason('22.23.4', '>=24.9.0', schedule, '2026-11-04'))
   assert.ok(nodeSupportReason('24.8.0', '>=24.9.0', schedule, '2026-11-04'))
   assert.equal(nodeSupportReason('24.9.0', '>=24.9.0', schedule, '2026-11-04'), undefined)
   assert.ok(nodeSupportReason('22.23.4', required, schedule, '2027-05-01'))
 })
 
-test('the plugin admits maintained Node branches without imposing Node 24 on older DSH', async () => {
+test('the plugin requires Node 24.9 or a newer maintained branch', async () => {
   const { engines } = z.object({ engines: z.object({ node: z.string() }) }).parse(JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')))
-  for (const version of ['22.19.0', '24.0.0', '26.0.0']) assert.ok(Bun.semver.satisfies(version, engines.node), version)
-  for (const version of ['22.18.0', '23.11.0', '25.0.0']) assert.equal(Bun.semver.satisfies(version, engines.node), false, version)
+  for (const version of ['24.9.0', '24.22.2', '26.0.0']) assert.ok(Bun.semver.satisfies(version, engines.node), version)
+  for (const version of ['22.19.0', '23.11.0', '24.8.0', '25.0.0']) assert.equal(Bun.semver.satisfies(version, engines.node), false, version)
 })

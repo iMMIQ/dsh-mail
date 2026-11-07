@@ -5,24 +5,14 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { Config as DomainConfig, accountSchema } from './config.ts'
+import { Config as DomainConfig } from './config.ts'
+import { settingsValueSchema } from './config-schema.ts'
 
+const stateDirectory = join(homedir(), '.dsh', 'mail')
 /** Plain values persisted by the DSH settings editor. */
-export const settingsSchema = z.strictObject({
-  ...DomainConfig.shape,
-  enabled: z.boolean().default(true),
-  stateDirectory: DomainConfig.shape.stateDirectory.default(join(homedir(), '.dsh', 'mail')),
-  accounts: z.array(accountSchema).default([]),
-  senderPolicies: DomainConfig.shape.senderPolicies.default({}),
-  templates: DomainConfig.shape.templates.default({}),
+export const settingsSchema = settingsValueSchema.safeExtend({
+  stateDirectory: DomainConfig.shape.stateDirectory.default(stateDirectory),
   rules: DomainConfig.shape.rules.default([]),
-}).superRefine((value, ctx) => {
-  if (value.enabled && (!value.accounts.length || !value.rules.length)) ctx.addIssue({ code: 'custom', message: 'Configure an account and a rule before enabling mail' })
-  if (value.accounts.length || value.rules.length || value.enabled) {
-    const { enabled: _enabled, ...configuration } = value
-    const parsed = DomainConfig.safeParse(configuration)
-    if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ code: 'custom', path: issue.path, message: issue.message })
-  }
 })
 
 /** Ordinary settings values returned to authenticated clients. */
@@ -32,7 +22,7 @@ export type LiveSettings = { [K in keyof MailSettings]: Volatile<MailSettings[K]
 
 const schema = Schema.object({
   enabled: Schema.boolean().default(true).volatile(),
-  stateDirectory: Schema.string().default(join(homedir(), '.dsh', 'mail')).volatile(),
+  stateDirectory: Schema.string().default(stateDirectory).volatile(),
   accounts: Schema.array(Schema.any<MailSettings['accounts'][number]>()).default([]).volatile(),
   senderPolicies: Schema.any<MailSettings['senderPolicies']>().default({}).volatile(),
   templates: Schema.dict(Schema.string()).default({}).volatile(),

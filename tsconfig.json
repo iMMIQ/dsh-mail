@@ -16,7 +16,11 @@
       "bun"
     ],
     "emitDeclarationOnly": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "lib": [
+      "ES2024",
+      "ESNext.RegExp"
+    ]
   },
   "include": [
     "src/*.ts"

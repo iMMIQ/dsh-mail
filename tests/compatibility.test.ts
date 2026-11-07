@@ -9,12 +9,12 @@ import { z } from 'zod'
 import remote, { TYPERT_REMOTE } from '../src/remote.ts'
 import { TYPERT } from '../src/typert.ts'
 
-test('DSH admits releases with the Remote helper and rejects earlier hosts', async () => {
+test('DSH admits the Node 24 generation and rejects older and next-minor hosts', async () => {
   const manifest = z.record(z.string(), z.unknown()).parse(JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')))
-  for (const version of ['0.2.1-alpha.3', '0.2.1-alpha.4', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.9']) {
+  for (const version of ['0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2', '0.2.9']) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, version), undefined, version)
   }
-  for (const version of ['0.1.7-rc.2', '0.2.0-rc.1', '0.2.0', '0.2.1-alpha.1', '0.2.1-alpha.2']) assert.ok(evaluatePluginCompatibility(manifest, {}, version), version)
+  for (const version of ['0.2.1-alpha.3', '0.2.1-rc.5', '0.2.2-alpha.1', '0.3.0-alpha.1', '0.3.0-rc.1', '0.3.0', '1.0.0']) assert.ok(evaluatePluginCompatibility(manifest, {}, version), version)
 })
 
 test('the DSH registry admits both UI endpoints with strict parameter and result validation', async () => {
@@ -41,5 +41,7 @@ test('the DSH registry admits both UI endpoints with strict parameter and result
     const result = check.result
     if (result.mode !== 'strict') throw new Error('Expected strict connection result validation')
     assert.throws(() => result.create().parse({ imap: 'ok', smtp: 'password' }))
+    const pop3 = { imap: 'absent', smtp: 'ok', pop3: 'failed' }
+    assert.deepEqual(result.create().parse(pop3), pop3)
   } finally { await ctx.fiber.dispose() }
 })

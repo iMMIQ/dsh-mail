@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** TLS-only IMAP reception and SMTP submission with conservative failure classification. */
 import { setTimeout as delay } from 'node:timers/promises'
-import { ImapFlow } from 'imapflow'
-import nodemailer from 'nodemailer'
+import type { ImapFlow } from 'imapflow'
 import type SMTPTransport from 'nodemailer/lib/smtp-transport/index.js'
 import type { Account, Config } from './config.ts'
 import { MailRuntime, identity } from './runtime.ts'
-import { MailError, type SendOutcome, type TaskRecord } from './types.ts'
+import { MailError, type SendOutcome, type OutboundMessage } from './types.ts'
+import { createImapConnection, createSmtpTransport } from './connections.ts'
 
 /** Read a current secret without exposing it to task or transport logs. */
 export type ResolveSecret = (ref: string) => Promise<string>
@@ -31,13 +31,8 @@ export class ImapReceiver {
       try {
         const password = await this.secret(receive.auth.credentialRef)
         signal.throwIfAborted()
-        client = new ImapFlow({ host: receive.host, port: receive.port, secure: receive.tls === 'direct',
-          ...(receive.tls === 'starttls' ? { doSTARTTLS: true } : {}),
-          auth: { user: receive.auth.user, pass: password }, logger: false,
-          tls: { rejectUnauthorized: true, ...(receive.ca ? { ca: receive.ca } : {}) },
-          connectionTimeout: this.config.runtime.connectionTimeoutMs, greetingTimeout: this.config.runtime.connectionTimeoutMs,
-          socketTimeout: Math.max(this.config.runtime.connectionTimeoutMs, receive.rescanIntervalMs * 2),
-        })
+        client = createImapConnection(receive, password, this.config.runtime.connectionTimeoutMs,
+          Math.max(this.config.runtime.connectionTimeoutMs, receive.rescanIntervalMs * 2))
         this.clients.add(client)
         const current = client
         let wake: (() => void) | undefined
@@ -112,9 +107,9 @@ export class ImapReceiver {
 }
 
 /** Open a fresh bounded SMTP attempt; no background pool can resubmit after cancellation. */
-export function smtpSender(config: Config, secret: ResolveSecret): (task: TaskRecord, signal: AbortSignal) => Promise<SendOutcome> {
-  return async (task, signal) => {
-    const account = config.accounts.find(a => a.id === task.rule.reply.account)
+export function smtpSender(config: Config, secret: ResolveSecret): (message: OutboundMessage, signal: AbortSignal) => Promise<SendOutcome> {
+  return async (message, signal) => {
+    const account = config.accounts.find(a => a.id === message.account)
     const send = account?.send
     if (!account || !send) return { state: 'failed', retryable: false, reason: 'send-account-missing' }
     let password: string
@@ -122,20 +117,15 @@ export function smtpSender(config: Config, secret: ResolveSecret): (task: TaskRe
       return { state: 'failed', retryable: false, reason: error instanceof MailError ? error.code : 'credential-unavailable' }
     }
     if (signal.aborted) return { state: 'failed', retryable: true, reason: 'submission-not-started' }
-    const transport = nodemailer.createTransport({ host: send.host, port: send.port, secure: send.tls === 'direct',
-      requireTLS: send.tls === 'starttls', auth: { user: send.auth.user, pass: password },
-      tls: { rejectUnauthorized: true, ...(send.ca ? { ca: send.ca } : {}) },
-      connectionTimeout: config.runtime.connectionTimeoutMs, greetingTimeout: config.runtime.connectionTimeoutMs,
-      socketTimeout: config.runtime.connectionTimeoutMs, logger: false, debug: false,
-    })
+    const transport = createSmtpTransport(send, password, config.runtime.connectionTimeoutMs)
     const abort = (): void => transport.close()
     signal.addEventListener('abort', abort, { once: true })
     try {
-      const info: SMTPTransport.SentMessageInfo = await transport.sendMail({ from: account.address, to: task.rule.reply.to,
-        replyTo: config.accounts.find(account => account.id === task.account)?.address,
-        subject: task.outbox.subject, text: task.outbox.text, ...(task.outbox.html ? { html: task.outbox.html } : {}), messageId: task.outbox.messageId,
-        ...(task.originalMessageId ? { inReplyTo: task.originalMessageId, references: [...task.references, task.originalMessageId].slice(-20) } : {}),
-        headers: { 'Auto-Submitted': 'auto-replied', 'X-DSH-Mail-Task': task.id },
+      const info: SMTPTransport.SentMessageInfo = await transport.sendMail({ from: account.address, to: message.to,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        subject: message.subject, text: message.text, ...(message.html ? { html: message.html } : {}), messageId: message.messageId,
+        ...(message.inReplyTo ? { inReplyTo: message.inReplyTo, references: message.references } : {}),
+        headers: { 'Auto-Submitted': 'auto-replied', 'X-DSH-Mail-Task': message.taskId },
         disableFileAccess: true, disableUrlAccess: true,
       })
       return info.accepted.length === 1 ? { state: 'accepted' } : { state: 'failed', retryable: false, reason: 'recipient-rejected' }

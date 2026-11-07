@@ -7,8 +7,7 @@ import type { Config, Rule } from './config.ts'
 import { parseMail, matches, systemReason, taskPrompt, replyInput } from './mail.ts'
 import { Spool } from './store.ts'
 import { canonicalWorkspace, emailWorkspace, taskWorkspace } from './workspace.ts'
-import { replyHtml } from './email-template.ts'
-import { replyText } from './reply.ts'
+import { createOutbox, outboundMessage, renderResult } from './outbound.ts'
 import { MailError, type Delivery, type InboxRecord, type Mail, type MailId, type RuntimeDependencies, type RunReport, type TaskId, type TaskRecord } from './types.ts'
 
 /** Shared decision produced by preview and actual ingestion without persistence. */
@@ -25,7 +24,6 @@ export class MailRuntime {
   private admission: Promise<void> = Promise.resolve()
   private ticking: Promise<void> | undefined
   private administration: Promise<void> = Promise.resolve()
-  private writes: Promise<void> = Promise.resolve()
   private administering = false
   private readonly controller = new AbortController()
   private readonly workers = new Map<TaskId, { controller: AbortController; done: Promise<void>; workspace: string }>()
@@ -45,9 +43,9 @@ export class MailRuntime {
         await this.settle(task, 'needs_attention', 'A previous turn was interrupted. Inspect the original session before continuing.', 'previous-turn-interrupted')
       }
       if (task.receipt?.state === 'sending') await this.updateTask(task.id, current => ({ ...current, receipt: { ...current.receipt!, state: 'unknown', reason: 'restart-during-send' } }))
-      if (task.outbox.state === 'sending') await this.deps.store.putTask({ ...task, outbox: { ...task.outbox, state: 'unknown', reason: 'restart-during-send' } })
+      if (task.outbox.state === 'sending') await this.updateTask(task.id, current => ({ ...current, outbox: { ...current.outbox, state: 'unknown', reason: 'restart-during-send' } }))
       if (task.state === 'starting' || task.state === 'running') {
-        await this.settle({ ...task, outbox: task.outbox.state === 'sending' ? { ...task.outbox, state: 'unknown', reason: 'restart-during-send' } : task.outbox },
+        await this.settle(task,
           'needs_attention', 'The process stopped during execution. Inspect the DSH session before retrying.', 'restart-during-execution')
       }
     }
@@ -64,8 +62,8 @@ export class MailRuntime {
     const done = this.admission.then(async () => {
       this.assertUsable()
       const id = brandString<MailId>(identity(delivery.account, delivery.folder, delivery.uidValidity, delivery.uid))
-      if (this.deps.store.inbox().some(r => r.id === id)) return
-      if (this.deps.store.inbox().length >= this.config.runtime.maxRecords) throw new MailError('record-capacity-reached', true)
+      if (this.deps.store.getInbox(id)) return
+      if (this.deps.store.inboxCount >= this.config.runtime.maxRecords) throw new MailError('record-capacity-reached', true)
       const pending = this.deps.store.inbox().filter(r => r.state === 'stored' || r.state === 'verification_pending').length
         + this.deps.store.tasks().filter(r => r.state === 'queued').length
       if (pending >= this.config.runtime.maxQueuedTasks) throw new MailError('queue-full', true)
@@ -162,16 +160,18 @@ export class MailRuntime {
         return
       }
       const id = brandString<TaskId>(identity(record.id, rule.id))
-      if (!this.deps.store.tasks().some(t => t.id === id)) {
+      if (!this.deps.store.getTask(id)) {
+        const address = this.config.accounts.find(account => account.id === rule.reply.account)!.address
+        const subject = this.replySubject(mail.subject)
         await this.deps.store.putTask({ id, mailId: record.id, account: record.account, rule: structuredClone(rule), createdAt: this.now(), prompt, workspacePath,
           title: parent?.title ?? `[Mail] ${mail.subject.replace(/[\r\n]/g, ' ').slice(0, 160)}`, sessionId: parent?.sessionId ?? `mail-${id}`, messageId: `mail-input-${id}`,
           sequence: parent ? this.deps.store.tasks().filter(task => task.sessionId === parent.sessionId).length : 0, inputHash: record.rawHash, ...(parent ? { continuation: true, ...(parent.origin ? { origin: parent.origin } : {}) } : {}),
           originalMessageId: mail.messageId, references: mail.references.slice(-20), state: 'queued', summary: '', reason: '', attempt: 1, lastOutput: '',
           authorization: { sender: mail.from, policy: structuredClone(this.config.senderPolicies[rule.authorization.policy]!) },
           operations: releaseReply ? [{ kind: 'operator-released-reply', at: this.now() }] : [],
-          outbox: { state: 'none', messageId: `<dsh-mail-${id}@${this.config.accounts.find(a => a.id === rule.reply.account)?.address.split('@')[1]}>`,
-            attempts: 0, nextAt: 0, subject: this.replySubject(mail.subject), text: '', reason: '' },
-          ...(this.config.notifications.receipts ? { receipt: { state: 'pending' as const, messageId: `<dsh-mail-received-${id}@${this.config.accounts.find(a => a.id === rule.reply.account)?.address.split('@')[1]}>`, attempts: 0, nextAt: this.now(), subject: this.replySubject(mail.subject), text: `Task: ${id}\nSession: ${parent?.sessionId ?? `mail-${id}`}\n\nReceived and queued. The final result will follow in this email thread.`, reason: '' } } : {}) })
+          outbox: createOutbox({ id, address, subject, state: 'none', nextAt: 0 }),
+          ...(this.config.notifications.receipts ? { receipt: createOutbox({ id, address, subject, state: 'pending', nextAt: this.now(), kind: 'receipt',
+            text: `Task: ${id}\nSession: ${parent?.sessionId ?? `mail-${id}`}\n\nReceived and queued. The final result will follow in this email thread.` }) } : {}) })
       }
     }
     await this.deps.store.putInbox({ ...record, state: decision.state, reason: decision.reason,
@@ -233,23 +233,16 @@ export class MailRuntime {
       const { finishedAt: _previousFinish, ...observed } = { ...current.report, ...report }
       const finishedAt = report?.finishedAt ?? (state === 'needs_attention' ? undefined : this.now())
       const settled = { ...current, state, summary, reason, lastOutput, report: { ...observed, ...(finishedAt !== undefined ? { finishedAt } : {}) } }
-      const html = replyHtml(settled, this.config.runtime.maxReplyBytes)
       const { html: _previousHtml, ...outbox } = current.outbox
-      return { ...settled, outbox: { ...outbox, state: notify ? 'pending' : 'none', text: replyText(settled, this.config.runtime.maxReplyBytes),
-        ...(html ? { html } : {}), nextAt: this.now() } }
+      return { ...settled, outbox: { ...outbox, state: notify ? 'pending' : 'none', ...renderResult(settled, this.config.runtime.maxReplyBytes), nextAt: this.now() } }
     })
   }
 
   private replySubject(subject: string): string { return `Re: ${subject.replace(/^(?:(?:re|回复)\s*[:：]\s*)+/i, '').replace(/[\r\n]/g, ' ').slice(0, 160)}` }
 
-  private updateTask(id: TaskId, update: (task: TaskRecord) => TaskRecord): Promise<void> {
-    const write = this.writes.then(async () => {
-      const task = this.deps.store.tasks().find(task => task.id === id)
-      if (!task) throw new MailError('task-not-found')
-      await this.deps.store.putTask(update(task))
-    })
-    this.writes = write.catch(error => { this.block(error) })
-    return write
+  private async updateTask(id: TaskId, update: (task: TaskRecord) => TaskRecord): Promise<void> {
+    try { await this.deps.store.updateTask(id, update) }
+    catch (error) { this.block(error); throw error }
   }
 
   private async send(task: TaskRecord, field: 'outbox' | 'receipt' = 'outbox'): Promise<void> {
@@ -262,7 +255,7 @@ export class MailRuntime {
     await this.updateTask(task.id, latest => ({ ...latest, [field]: sending }))
     this.lastSendAt = this.now()
     let outcome
-    try { outcome = await this.deps.send({ ...task, outbox: sending }, this.controller.signal) } catch (error) {
+    try { outcome = await this.deps.send(outboundMessage(task, sending, this.config), this.controller.signal) } catch (error) {
       outcome = { state: 'unknown' as const, reason: error instanceof MailError ? error.code : 'submission-unknown' }
     }
     const retry = outcome.state === 'failed' && outcome.retryable && sending.attempts < this.config.runtime.maxSendAttempts
@@ -294,18 +287,16 @@ export class MailRuntime {
         : this.config.rules.find(rule => rule.id === this.config.notifications.rule) ?? this.config.rules[0]
       if (!rule) throw new MailError('notification-rule-removed')
       const id = brandString<TaskId>(identity('session-notification', input.sessionId, input.turn))
-      if (this.deps.store.tasks().some(task => task.id === id)) return
-      if (this.deps.store.tasks().length >= this.config.runtime.maxRecords) throw new MailError('record-capacity-reached')
+      if (this.deps.store.getTask(id)) return
+      if (this.deps.store.taskCount >= this.config.runtime.maxRecords) throw new MailError('record-capacity-reached')
       const task: TaskRecord = { id, mailId: brandString<MailId>(identity('session-notification', input.sessionId, input.turn)), account: rule.account, rule: structuredClone(rule),
         createdAt: this.now(), prompt: '', title: input.title, sessionId: input.sessionId, messageId: `mail-input-${id}`, ...(input.workspacePath ? { workspacePath: input.workspacePath } : {}),
         originalMessageId: previous?.outbox.messageId ?? null, references: previous ? [...previous.references, ...(previous.originalMessageId ? [previous.originalMessageId] : [])].slice(-20) : [], state: input.state, summary: input.state === 'succeeded' ? 'DSH turn completed.' : 'Inspect this DSH session before continuing.',
         reason: input.reason, attempt: 1, lastOutput: input.lastOutput, ...(input.report ? { report: input.report } : {}), origin: 'session', turn: input.turn,
         authorization: { sender: previous?.authorization.sender ?? rule.reply.to.toLowerCase(), policy: structuredClone(this.config.senderPolicies[rule.authorization.policy]!) }, operations: [],
-        outbox: { state: 'pending', messageId: `<dsh-mail-${id}@${this.config.accounts.find(account => account.id === rule.reply.account)?.address.split('@')[1]}>`,
-          attempts: 0, nextAt: this.now(), subject: `${previous ? 'Re: ' : ''}[DSH] ${input.title.replace(/[\r\n]/g, ' ').slice(0, 160)}`, text: '', reason: '' } }
-      task.outbox.text = replyText(task, this.config.runtime.maxReplyBytes)
-      const html = replyHtml(task, this.config.runtime.maxReplyBytes)
-      if (html) task.outbox.html = html
+        outbox: createOutbox({ id, address: this.config.accounts.find(account => account.id === rule.reply.account)!.address,
+          subject: `${previous ? 'Re: ' : ''}[DSH] ${input.title.replace(/[\r\n]/g, ' ').slice(0, 160)}`, state: 'pending', nextAt: this.now() }) }
+      Object.assign(task.outbox, renderResult(task, this.config.runtime.maxReplyBytes))
       await this.deps.store.putTask(task)
     })
   }
@@ -334,7 +325,7 @@ export class MailRuntime {
   cancel(id: string): void { for (const [key, worker] of this.workers) if (key === id) worker.controller.abort(new MailError('user-cancelled')) }
   /** Retry only a definitively failed notification; unknown requires explicit acknowledgement. */
   retryNotification(id: string, acknowledgeUnknown = false): Promise<void> { return this.manage(async () => {
-    const task = this.deps.store.tasks().find(t => t.id === id)
+    const task = this.deps.store.getTask(brandString<TaskId>(id))
     if (!task || !(task.outbox.state === 'failed' || (acknowledgeUnknown && task.outbox.state === 'unknown'))) throw new MailError('notification-not-retryable')
     const operation = acknowledgeUnknown ? 'operator-acknowledged-possible-duplicate' : 'operator-retry-notification'
     await this.deps.store.putTask({ ...task, operations: [...task.operations, { kind: operation, at: this.now() }],
@@ -349,13 +340,13 @@ export class MailRuntime {
   }
   /** Explicitly convert a held reply into a new independent task after re-verification. */
   releaseReply(id: string): Promise<void> { return this.manage(async () => {
-    const record = this.deps.store.inbox().find(r => r.id === id)
+    const record = this.deps.store.getInbox(brandString<MailId>(id))
     if (!record || record.state !== 'held') throw new MailError('mail-not-held')
     await this.evaluate(record, true)
   }) }
   /** Retry with a new message identity; follow-ups retain their conversation, initial tasks create a new Session. */
   retryTask(id: string): Promise<void> { return this.manage(async () => {
-    const task = this.deps.store.tasks().find(t => t.id === id)
+    const task = this.deps.store.getTask(brandString<TaskId>(id))
     if (!task || !['failed', 'cancelled', 'timed_out', 'needs_attention'].includes(task.state)) throw new MailError('task-not-retryable')
     if (task.origin === 'session' && !task.continuation) throw new MailError('notification-has-no-mail-input')
     const nextId = brandString<TaskId>(identity(task.id, 'operator-retry', this.deps.store.tasks().filter(t => t.mailId === task.mailId).length))
@@ -383,6 +374,5 @@ export class MailRuntime {
     await this.administration
     await this.ticking
     await this.whenSettled()
-    await this.writes
   }
 }

@@ -2,8 +2,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
 import { simpleParser } from 'mailparser'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { setTimeout as delay } from 'node:timers/promises'
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -14,6 +12,7 @@ import { Config } from '../src/config.ts'
 import { configuration, message } from './helpers.ts'
 import { mailServers, waitFor } from './network.ts'
 import { pop3Server } from './pop3-network.ts'
+import { profileHost } from './profile-host.ts'
 
 const host = z.object({ version: z.string(), dependencies: z.record(z.string(), z.string()) }).parse(JSON.parse(await readFile(resolve('node_modules/@deepseek-ai/dsh/package.json'), 'utf8')))
 
@@ -24,19 +23,8 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   resources.defer(() => rm(root, { recursive: true, force: true }))
   const servers = await mailServers(resources)
   const pop3 = protocol === 'pop3' ? await pop3Server(resources, 'starttls') : undefined
-  let child: ChildProcess | undefined
-  let exit: Promise<void> | undefined
-  let exited = false
-  // Stop the profile before closing its mail servers and deleting its data.
-  resources.defer(async () => {
-    if (!child || !exit) return
-    if (!exited) child.kill('SIGTERM')
-    const timeout = new AbortController()
-    try {
-      await Promise.race([exit, delay(10_000, undefined, { signal: timeout.signal }).then(() => { throw new Error('dsh did not stop after SIGTERM') })])
-    } catch (error) { child.kill('SIGKILL'); await exit; throw error } finally { timeout.abort() }
-  })
   const home = join(root, 'home')
+  const hostProcess = profileHost(resources, home)
   const profile = join(home, 'profiles', 'mail-test')
   await mkdir(profile, { recursive: true })
   await mkdir(join(profile, 'node_modules'), { recursive: true })
@@ -82,23 +70,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     { id: 'fixture', name: resolve('tests/fixtures/driver.mjs'), config: { root, scenario, workspace: emailDirectory } },
   ] }, { id: 'mail-automation', disabled: false, config }]
   await writeFile(join(profile, 'cordis.patch.yml'), dump(patches, { noRefs: true }))
-  const node = Bun.which(process.env.DSH_TEST_NODE ?? 'node')
-  if (!node) throw new Error('Install a Node.js host compatible with the selected DSH version')
-  let output = ''
-  const launch = (): void => {
-    exited = false
-    output = ''
-    child = spawn(node, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'mail-test'],
-      { cwd: resolve('.'), env: { ...process.env, DSH_HOME: home, MAIL_PASSWORD: 'testpass' }, stdio: ['ignore', 'pipe', 'pipe'] })
-    child.stdout!.on('data', chunk => { output += String(chunk) })
-    child.stderr!.on('data', chunk => { output += String(chunk) })
-    exit = new Promise<void>(resolveExit => child!.once('exit', () => { exited = true; resolveExit() }))
-  }
-  launch()
-  await waitFor(() => {
-    if (exited) throw new Error(`dsh exited before ready:\n${output}`)
-    return output.includes('DSH_MAIL_READY')
-  }, () => `dsh ready; ${output}`)
+  await hostProcess.start()
   if (scenario === 'conversation' || scenario === 'external') {
     const send = (id: string, body: string, parent?: string): void => {
       const raw = message(parent ? '回复：continue with a different title' : '[DSH] remember', body, parent ? [`In-Reply-To: ${parent}`, `References: ${parent}`] : [])
@@ -114,7 +86,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
       const mails = await Promise.all(servers.received.map(raw => parseMail(raw, config.runtime)))
       return mails.filter(mail => mail.body.includes('Status:'))
     }
-    const waitResults = async (count: number) => waitFor(async () => { if (exited) throw new Error(`DSH exited before the result: ${output}`); return (await results()).length >= count }, () => `waiting for ${count} turn emails; ${output}`)
+    const waitResults = async (count: number) => waitFor(async () => { if (hostProcess.exited) throw new Error(`DSH exited before the result: ${hostProcess.output}`); return (await results()).length >= count }, () => `waiting for ${count} turn emails; ${hostProcess.output}`)
     if (scenario === 'external') {
       await control('initial', 'Remember amber.')
     } else send('initial', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nRemember amber.`)
@@ -133,7 +105,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
       assert.deepEqual({ subject: first.subject, to: first.to, body: first.body.trim().replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(emailDirectory, '{{workspace}}') }, expected)
     }
     send('hold', 'HOLD: report the remembered color.\n\nOn Monday, DSH wrote:\n> OLD QUOTED INSTRUCTION', first.messageId)
-    await waitFor(async () => { try { await readFile(join(root, 'entered')); return true } catch (error) { if (z.object({ code: z.string() }).parse(error).code !== 'ENOENT') throw error; return false } }, () => `continuation entered; ${output}`)
+    await waitFor(async () => { try { await readFile(join(root, 'entered')); return true } catch (error) { if (z.object({ code: z.string() }).parse(error).code !== 'ENOENT') throw error; return false } }, () => `continuation entered; ${hostProcess.output}`)
     send('queued', 'Report the remembered color again.', first.messageId)
     const queuedRaw = message('Re: [DSH] duplicate', 'Report the remembered color again.', [`In-Reply-To: ${first.messageId}`]).toString().replace('<fixture@example.com>', '<queued@example.com>')
     // Same Message-ID with different content is quarantined, not executed twice.
@@ -142,7 +114,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     await waitFor(async () => {
       const current = z.object({ tasks: z.array(z.object({ state: z.string() })) }).parse(JSON.parse(await readFile(join(root, 'status.json'), 'utf8')))
       return current.tasks.some(task => task.state === 'queued')
-    }, () => `second follow-up queued; ${output}`)
+    }, () => `second follow-up queued; ${hostProcess.output}`)
     await writeFile(join(root, 'release'), 'continue')
     await waitResults(3)
     assert.ok((await results()).every(mail => mail.body.includes(`Session: ${sessionId}`)))
@@ -153,11 +125,8 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
       await waitResults(4)
     }
     const beforeRestart = (await results()).length
-    child!.kill('SIGTERM')
-    await waitFor(() => exited, () => 'profile stopped before restart')
-    await exit
-    launch()
-    await waitFor(() => output.includes('DSH_MAIL_READY'), () => `profile restarted; ${output}`)
+    await hostProcess.stop()
+    await hostProcess.start()
     send('after-restart', 'Report the remembered color after restart.', first.messageId)
     await waitResults(beforeRestart + 1)
     const final = (await results()).at(-1)!
@@ -186,7 +155,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   const taskMail = message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`)
   if (pop3) pop3.messages.push({ uid: 'profile-task', raw: taskMail })
   else servers.imap.appendMessage('INBOX', [], new Date(), taskMail.toString())
-  await waitFor(() => servers.received.length === 1, () => `result mail; ${output}`)
+  await waitFor(() => servers.received.length === 1, () => `result mail; ${hostProcess.output}`)
   const mime = await simpleParser(servers.received[0]!)
   assert.equal(typeof mime.html, 'string')
   assert.match(String(mime.html), /任务执行报告/)
@@ -202,7 +171,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   const response = await parseMail(servers.received[0]!, config.runtime)
   const readResult = async (path: string): Promise<string> => {
     try { return await readFile(path, 'utf8') }
-    catch (error) { throw new Error(`Missing fixture output ${path}\nReply: ${response.body}\nDSH: ${output}`, { cause: error }) }
+    catch (error) { throw new Error(`Missing fixture output ${path}\nReply: ${response.body}\nDSH: ${hostProcess.output}`, { cause: error }) }
   }
   if (success || scenario === 'model-error') assert.equal(await readResult(join(emailDirectory, 'evidence.txt')), 'created by a real DSH tool call\n')
   else await assert.rejects(readFile(join(emailDirectory, 'evidence.txt'), 'utf8'), { code: 'ENOENT' })
@@ -234,18 +203,18 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   const actual = { input: users[0]!.data.content.map(part => part.text).join('').replace(emailDirectory, '{{workspace}}'), calls, turnEnds: ends, permissions,
     reply: response.body.replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(/Session: mail-[a-f0-9]{64}/, 'Session: {{sessionId}}').replace(emailDirectory, '{{workspace}}').trim() }
   const snapshots = { success: 'mail-turn', 'text-only': 'mail-text-result', 'empty-result': 'mail-missing-result', 'model-error': 'mail-error', reconfigure: 'mail-turn', markdown: 'mail-markdown' }
-  const expected: unknown = JSON.parse(await readFile(resolve(`tests/snapshots/${protocol === 'pop3' ? 'mail-pop3' : snapshots[scenario]}.json`), 'utf8'))
+  const expected: unknown = JSON.parse(await readFile(resolve(`tests/snapshots/${protocol === 'pop3' && scenario === 'success' ? 'mail-pop3' : snapshots[scenario]}.json`), 'utf8'))
   assert.deepEqual(actual, expected)
   assert.doesNotMatch(response.body, /PRIVATE_FIXTURE_REASONING/)
   if (scenario === 'reconfigure') {
     const status = async () => z.object({ phase: z.string(), health: z.record(z.string(), z.string()), tasks: z.array(z.object({ state: z.string() })).optional() }).parse(JSON.parse(await readFile(join(root, 'status.json'), 'utf8')))
     await writeFile(join(profile, 'cordis.patch.yml'), dump([...patches.slice(0, -1), { id: 'mail-automation', config: { ...config, enabled: false } }], { noRefs: true }))
-    await waitFor(async () => (await status()).phase === 'paused', () => `mail paused after a live settings write; ${output}`)
+    await waitFor(async () => (await status()).phase === 'paused', () => `mail paused after a live settings write; ${hostProcess.output}`)
     await writeFile(join(profile, 'cordis.patch.yml'), dump([...patches.slice(0, -1), { id: 'mail-automation', config: { ...config, enabled: true } }], { noRefs: true }))
-    await waitFor(async () => { const current = await status(); return current.phase === 'running' && Object.values(current.health).includes('healthy') }, () => `mail resumed; ${output}`)
+    await waitFor(async () => { const current = await status(); return current.phase === 'running' && Object.values(current.health).includes('healthy') }, () => `mail resumed; ${hostProcess.output}`)
     assert.equal((await status()).tasks?.length, 1)
     servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] second task', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file.`).toString().replace('<fixture@example.com>', '<second@example.com>'))
-    await waitFor(() => servers.received.length === 2, () => `new mail executes after reconfiguration; ${output}`)
+    await waitFor(() => servers.received.length === 2, () => `new mail executes after reconfiguration; ${hostProcess.output}`)
     assert.equal((await parseMail(servers.received[1]!, config.runtime)).body.includes('Status: succeeded'), true)
   }
 }

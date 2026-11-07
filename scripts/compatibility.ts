@@ -11,17 +11,14 @@ const version = process.argv[2]
 if (!version || !/^\d+\.\d+\.\d+(?:-[\da-zA-Z.-]+)?$/.test(version)) throw new Error('Usage: bun run test:compat <exact DSH version> [node-path ...]')
 const source = fileURLToPath(new URL('../', import.meta.url))
 const manifest = z.object({
+  engines: z.object({ node: z.string(), dsh: z.string() }),
   devDependencies: z.record(z.string(), z.string()), peerDependencies: z.record(z.string(), z.string()),
 }).passthrough().parse(JSON.parse(await readFile(join(source, 'package.json'), 'utf8')))
+if (!Bun.semver.satisfies(version, manifest.engines.dsh)) throw new Error(`DSH ${version} is outside the plugin support range: ${manifest.engines.dsh}`)
 const response = await fetch(`https://registry.npmjs.org/@deepseek-ai%2Fdsh/${encodeURIComponent(version)}`)
 if (!response.ok) throw new Error(`Cannot read published DSH ${version}: HTTP ${response.status}`)
-const host = z.object({ version: z.literal(version), dependencies: z.record(z.string(), z.string()), engines: z.object({ node: z.string() }).optional() }).parse(await response.json())
-let nodeRequired = host.engines?.node
-if (!nodeRequired) {
-  const sourceManifest = await fetch(`https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/dsh-v${version}/package.json`)
-  if (!sourceManifest.ok) throw new Error(`Cannot read DSH ${version} source engines: HTTP ${sourceManifest.status}`)
-  nodeRequired = z.object({ engines: z.object({ node: z.string() }) }).parse(await sourceManifest.json()).engines.node
-}
+const host = z.object({ version: z.literal(version), dependencies: z.record(z.string(), z.string()), engines: z.object({ node: z.string() }) }).parse(await response.json())
+const nodeRequired = host.engines.node
 const scheduleResponse = await fetch('https://raw.githubusercontent.com/nodejs/Release/main/schedule.json')
 if (!scheduleResponse.ok) throw new Error(`Cannot read Node release schedule: HTTP ${scheduleResponse.status}`)
 const schedule = z.record(z.string(), z.object({ start: z.iso.date(), end: z.iso.date() })).parse(await scheduleResponse.json())
@@ -33,8 +30,9 @@ for (const requested of requestedNodes) {
   const probe = Bun.spawn([path, '--version'], { stdout: 'pipe', stderr: 'inherit' })
   const actual = (await new Response(probe.stdout).text()).trim()
   if (await probe.exited !== 0) throw new Error(`Cannot read Node version: ${path}`)
-  const reason = nodeSupportReason(actual, nodeRequired, schedule, new Date().toISOString().slice(0, 10))
-  if (reason) console.info(`Skipping Node ${actual}: ${reason}`)
+  const reason = nodeSupportReason(actual, manifest.engines.node, schedule, new Date().toISOString().slice(0, 10))
+  const hostReason = !Bun.semver.satisfies(actual, nodeRequired) ? `DSH requires Node ${nodeRequired}` : undefined
+  if (reason || hostReason) console.info(`Skipping Node ${actual}: ${reason ?? hostReason}`)
   else nodes.push({ path, version: actual })
 }
 if (!nodes.length) throw new Error(`No maintained Node executable satisfies DSH ${version}: ${nodeRequired}`)

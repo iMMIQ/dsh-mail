@@ -62,8 +62,8 @@ for (const [state, label] of [['failed', '执行失败'], ['cancelled', '已取�
 test('HTML is frozen with settlement and stays identical across SMTP retries', async () => {
   await using resources = new AsyncDisposableStack()
   const bodies: (string | undefined)[] = []
-  const f = await fixture(resources, { async send(task) {
-    bodies.push(task.outbox.html)
+  const f = await fixture(resources, { async send(message) {
+    bodies.push(message.html)
     return bodies.length === 1 ? { state: 'failed', retryable: true, reason: 'temporary' } : { state: 'accepted' }
   } })
   await f.runtime.admit(f.delivery()); await f.finish()

@@ -8,6 +8,7 @@ import type { MailSettings } from '../settings.ts'
 import type { Account, Rule } from '../config.ts'
 import type { MailStatus } from '../ui-types.ts'
 import type { ConnectionCheck } from '../check.ts'
+import { addressSchema, settingsValueSchema, createAccountDraft, createReceiveDraft, createSendDraft, createRuleDraft, defaultPort, validIntegerText } from '../config-schema.ts'
 
 interface CredentialView { configured: boolean; writable: boolean }
 interface CredentialDraft extends CredentialView { text: string; remove: boolean; ready: boolean }
@@ -33,6 +34,7 @@ export interface MailPageState {
   separateServers: boolean
   checkAccountId: string
   check: ConnectionCheck | undefined
+  incomplete: ('address' | 'mailServer' | 'password' | 'yourAddress')[]
   toast: { id: number; message: Notice; success: boolean } | undefined
 }
 /** Framework-injected face of the page and its independent toast host. */
@@ -60,29 +62,42 @@ function refs(value: MailSettings): string[] {
   return [...new Set(value.accounts.flatMap(account => [account.receive?.auth.credentialRef, account.send?.auth.credentialRef].filter((ref): ref is string => ref !== undefined)))]
 }
 function valid(value: MailSettings, fields: Record<string, string>): boolean {
-  if (Object.entries(fields).some(([key, text]) => /(?:port|maxReplyBytes|maxConcurrentTasks|timeoutMs|maxSteps)$/.test(key) && (!/^\d+$/.test(text) || Number(text) < 1))) return false
-  if (value.enabled && (!value.accounts.length || !value.rules.length)) return false
-  return value.accounts.every(account => z.email().safeParse(account.address).success && Boolean(account.receive || account.send) && [account.receive, account.send].every(connection => !connection || Boolean(connection.host.trim() && !connection.host.includes('://') && connection.auth.user.trim() && connection.port > 0 && connection.port <= 65535
-      && (!connection.ca || connection.ca.includes('-----BEGIN CERTIFICATE-----') && !/-----BEGIN[^\n]*PRIVATE KEY-----/.test(connection.ca)))))
-    && value.runtime.maxReplyBytes >= 1024
-    && Object.values(value.senderPolicies).every(policy => policy.evidence === 'trusted-mta' ? policy.authservIds.length > 0 : (policy.trustedSenders ?? []).every(address => z.email().safeParse(address).success))
-    && value.rules.every(rule => value.accounts.some(account => account.id === rule.account && account.receive) && value.accounts.some(account => account.id === rule.reply.account && account.send) && rule.authorization.allowedSenders.length > 0
-      && rule.authorization.allowedSenders.every(address => z.email().safeParse(address).success) && z.email().safeParse(rule.reply.to).success
-      && Boolean((rule.task.agentPreset === undefined || rule.task.agentPreset.trim()) && rule.task.permissionPreset.trim()) && Boolean(value.senderPolicies[rule.authorization.policy]) && Boolean(value.templates[rule.task.template]?.trim()))
+  return !Object.entries(fields).some(([key, text]) => /(?:port|maxReplyBytes|maxConcurrentTasks|timeoutMs|maxSteps)$/.test(key) && !validIntegerText(text))
+    && settingsValueSchema.safeParse(value).success
 }
 const split = (text: string): string[] => text.split(/[\s,;]+/).filter(Boolean)
 
-function makeAccount(id: string): Account {
-  const credentialRef = `DSH_MAIL_${crypto.randomUUID().replaceAll('-', '').toUpperCase()}`
-  return { id, address: '', receive: { protocol: 'imap', host: '', port: 993, tls: 'direct', auth: { user: '', credentialRef }, folders: ['INBOX'], initialSync: 'new-only', rescanIntervalMs: 60_000, maxMessageAgeMs: 172_800_000 },
-    send: { protocol: 'smtp', host: '', port: 465, tls: 'direct', auth: { user: '', credentialRef } } }
+function setAddress(account: Account, address: string): void {
+  for (const connection of [account.receive, account.send]) if (connection && (!connection.auth.user || connection.auth.user === account.address)) connection.auth.user = address
+  account.address = address
+}
+function removeRules(draft: MailSettings, remove: (rule: Rule) => boolean): void {
+  draft.rules = draft.rules.filter(rule => !remove(rule))
+  if (draft.notifications.rule && !draft.rules.some(rule => rule.id === draft.notifications.rule)) delete draft.notifications.rule
+  if (!draft.rules.length) draft.notifications.enabled = false
+}
+function missingSetup(state: MailPageState): MailPageState['incomplete'] {
+  const account = state.draft?.accounts.find(value => value.id === state.accountId)
+  const rules = state.draft?.rules.filter(value => value.account === account?.id) ?? []
+  const rule = rules.find(value => value.id === state.ruleId) ?? rules[0]
+  const incomplete: MailPageState['incomplete'] = []
+  if (!addressSchema.safeParse(account?.address).success) incomplete.push('address')
+  if (!(account?.receive ?? account?.send)?.host.trim()) incomplete.push('mailServer')
+  if (!state.draft?.accounts.length || !state.draft.accounts.every(value => [value.receive, value.send].every(connection => {
+    if (!connection) return true
+    const credential = state.credentials[connection.auth.credentialRef]
+    return credential?.ready && (credential.text || credential.configured && !credential.remove)
+  }))) incomplete.push('password')
+  if (!rule?.authorization.allowedSenders.length || !rule.authorization.allowedSenders.every(value => addressSchema.safeParse(value).success)) incomplete.push('yourAddress')
+  return incomplete
 }
 
 /** One controller per mounted browser plugin; all operations drain on disposal. */
 export class MailPageController {
   readonly store = createSnapshotStore<MailPageState>({ available: false, writable: false, dirty: false, invalid: false, saving: false, failed: false,
-    draft: undefined, accountId: '', ruleId: '', fields: {}, credentials: {}, status: undefined, checking: false, connecting: false, separateServers: false, checkAccountId: '', check: undefined, toast: undefined })
+    draft: undefined, accountId: '', ruleId: '', fields: {}, credentials: {}, status: undefined, checking: false, connecting: false, separateServers: false, checkAccountId: '', check: undefined, incomplete: ['address', 'mailServer', 'password', 'yourAddress'], toast: undefined })
   private baseline: number | undefined
+  private accepted: MailSettings | undefined
   private disposed = false
   private sequence = 0
   private credentialRead = 0
@@ -105,6 +120,7 @@ export class MailPageController {
   private publish(patch: Partial<MailPageState>): void {
     if (this.disposed) return
     const next = { ...this.state(), ...patch }
+    next.incomplete = missingSetup(next)
     next.invalid = next.draft !== undefined && !valid(next.draft, next.fields)
     this.store.set(next)
   }
@@ -120,6 +136,7 @@ export class MailPageController {
     this.publish({ available: snapshot.status === 'ready', writable: snapshot.writable })
     if (snapshot.status !== 'ready' || !snapshot.value || this.state().dirty || this.state().saving || this.state().connecting) return
     this.baseline = snapshot.revision
+    this.accepted = snapshot.value
     const draft = structuredClone(snapshot.value)
     const account = draft.accounts.find(a => a.id === this.state().accountId) ?? draft.accounts.find(a => a.receive) ?? draft.accounts[0]
     this.publish({ draft, accountId: account?.id ?? '', separateServers: Boolean(account?.receive && account.send && account.receive.host !== account.send.host),
@@ -142,13 +159,13 @@ export class MailPageController {
   selectRule(id: string): void { this.publish({ ruleId: id, fields: Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => key !== 'setup-sender')) }) }
   addAccount(): void {
     const id = freshId('mail', this.state().draft?.accounts ?? [])
-    this.edit(draft => { draft.accounts.push(makeAccount(id)) })
+    this.edit(draft => { draft.accounts.push(createAccountDraft(id)) })
     this.selectAccount(id)
     this.run(() => this.refreshCredentials())
   }
   removeAccount(): void {
     const id = this.state().accountId
-    this.edit(draft => { draft.accounts = draft.accounts.filter(account => account.id !== id); draft.rules = draft.rules.filter(rule => rule.account !== id && rule.reply.account !== id); if (draft.notifications.rule && !draft.rules.some(rule => rule.id === draft.notifications.rule)) delete draft.notifications.rule; if (!draft.rules.length) draft.notifications.enabled = false })
+    this.edit(draft => { draft.accounts = draft.accounts.filter(account => account.id !== id); removeRules(draft, rule => rule.account === id || rule.reply.account === id) })
     const keep = new Set(refs(this.state().draft!))
     this.protocolDrafts.delete(id)
     this.imapFolders.delete(id)
@@ -161,9 +178,7 @@ export class MailPageController {
       ?? freshId('signed', Object.keys(draft.senderPolicies).map(id => ({ id })))
     draft.senderPolicies[policy] ??= { evidence: 'local-signature' }
     draft.templates[id] = 'Execute this task in {{workspace}}.\nSubject: {{subject}}\n{{body}}\n{{attachmentText}}'
-    const rule: Rule = { id, account: account.id, priority: 0, authorization: { policy, allowedSenders: [] }, match: { subjectPrefix: '[DSH]' }, extract: {},
-      task: { permissionPreset: 'danger-full-access', template: id, timeoutMs: 900_000, maxSteps: 40, attachmentTypes: [] },
-      reply: { account: draft.accounts.find(a => a.id === account.id && a.send)?.id ?? draft.accounts.find(a => a.send)?.id ?? account.id, to: '', on: ['succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention'] } }
+    const rule = createRuleDraft(id, account.id, policy, draft.accounts.find(a => a.id === account.id && a.send)?.id ?? draft.accounts.find(a => a.send)?.id ?? account.id)
     draft.rules.push(rule)
     return rule
   }
@@ -179,10 +194,10 @@ export class MailPageController {
     let created = false
     this.edit(draft => {
       let account = draft.accounts.find(a => a.id === accountId)
-      if (!account) { account = makeAccount(freshId('mail', draft.accounts)); draft.accounts.push(account); accountId = account.id; created = true }
+      if (!account) { account = createAccountDraft(freshId('mail', draft.accounts)); draft.accounts.push(account); accountId = account.id; created = true }
       const rule = account.receive ? draft.rules.find(r => r.id === ruleId && r.account === accountId) ?? draft.rules.find(r => r.account === accountId) ?? this.makeRule(draft, account) : undefined
       ruleId = rule?.id ?? ''
-      if (field === 'address') { for (const connection of [account.receive, account.send]) if (connection && (!connection.auth.user || connection.auth.user === account.address)) connection.auth.user = text; account.address = text }
+      if (field === 'address') setAddress(account, text)
       if (field === 'server') { const connection = account.receive ?? account.send; if (connection) connection.host = text; if (!this.state().separateServers && account.send) account.send.host = text }
       if (field === 'sender' && rule) {
         const previous = rule.authorization.allowedSenders[0]
@@ -202,14 +217,14 @@ export class MailPageController {
     if (!separate) this.edit(draft => { const account = draft.accounts.find(a => a.id === this.state().accountId); if (account?.receive && account.send) account.send.host = account.receive.host })
     this.publish({ separateServers: separate })
   }
-  removeRule(): void { const id = this.state().ruleId; this.edit(draft => { draft.rules = draft.rules.filter(rule => rule.id !== id); if (draft.notifications.rule === id) delete draft.notifications.rule; if (!draft.rules.length) draft.notifications.enabled = false }); this.publish({ fields: {} }); this.selectRule(this.state().draft?.rules.find(rule => rule.account === this.state().accountId)?.id ?? '') }
+  removeRule(): void { const id = this.state().ruleId; this.edit(draft => { removeRules(draft, rule => rule.id === id) }); this.publish({ fields: {} }); this.selectRule(this.state().draft?.rules.find(rule => rule.account === this.state().accountId)?.id ?? '') }
   editAccount(field: string, text: string): void {
     const id = this.state().accountId
     let resetPort = false
     this.edit(draft => {
       const account = draft.accounts.find(value => value.id === id)
       if (!account) return
-      if (field === 'address') { for (const connection of [account.receive, account.send]) if (connection && (!connection.auth.user || connection.auth.user === account.address)) connection.auth.user = text; account.address = text; return }
+      if (field === 'address') { setAddress(account, text); return }
       if (field === 'mode') {
         const cached = this.protocolDrafts.get(id) ?? {}
         if (account.receive) cached.receive = account.receive
@@ -217,9 +232,9 @@ export class MailPageController {
         this.protocolDrafts.set(id, cached)
         const credentialRef = account.receive?.auth.credentialRef ?? account.send?.auth.credentialRef ?? `DSH_MAIL_${crypto.randomUUID().replaceAll('-', '').toUpperCase()}`
         if (text === 'send') delete account.receive
-        else account.receive ??= cached.receive ?? { protocol: 'imap', host: '', port: 993, tls: 'direct', auth: { user: account.address, credentialRef }, folders: ['INBOX'], initialSync: 'new-only', rescanIntervalMs: 60_000, maxMessageAgeMs: 172_800_000 }
+        else account.receive ??= cached.receive ?? createReceiveDraft(account.address, credentialRef)
         if (text === 'receive') delete account.send
-        else account.send ??= cached.send ?? { protocol: 'smtp', host: '', port: 465, tls: 'direct', auth: { user: account.address, credentialRef } }
+        else account.send ??= cached.send ?? createSendDraft(account.address, credentialRef)
         return
       }
       if (field === 'sharedCredential' && account.receive && account.send) {
@@ -231,9 +246,9 @@ export class MailPageController {
       if (!connection) return
       if (key === 'protocol' && side === 'receive' && account.receive && (text === 'imap' || text === 'pop3') && account.receive.protocol !== text) {
         const previous = account.receive
-        const standardPort = previous.protocol === 'imap' ? [993, 143] : [995, 110]
+        const standardPort = [defaultPort(previous.protocol, 'direct'), defaultPort(previous.protocol, 'starttls')]
         const { protocol: _protocol, ...common } = previous
-        const port = standardPort.includes(previous.port) ? text === 'imap' ? previous.tls === 'direct' ? 993 : 143 : previous.tls === 'direct' ? 995 : 110 : previous.port
+        const port = standardPort.includes(previous.port) ? defaultPort(text, previous.tls) : previous.port
         if (previous.protocol === 'imap') {
           this.imapFolders.set(id, previous.folders)
           const { folders: _folders, ...pop3 } = previous
@@ -245,8 +260,8 @@ export class MailPageController {
       if (key === 'user') connection.auth.user = text
       if (key === 'port' && /^\d+$/.test(text)) connection.port = Number(text)
       if (key === 'tls' && (text === 'direct' || text === 'starttls')) {
-        const direct = side === 'receive' ? connection.protocol === 'pop3' ? 995 : 993 : 465
-        const starttls = side === 'receive' ? connection.protocol === 'pop3' ? 110 : 143 : 587
+        const direct = defaultPort(connection.protocol, 'direct')
+        const starttls = defaultPort(connection.protocol, 'starttls')
         if (connection.port === direct || connection.port === starttls) { connection.port = text === 'direct' ? direct : starttls; resetPort = true }
         connection.tls = text
       }
@@ -358,10 +373,12 @@ export class MailPageController {
     let notice: Notice = 'saveFailed'
     try {
       const candidate = { ...wanted, enabled: credentialEdits.length ? false : wanted.enabled }
-      const operations = Object.entries(candidate).map(([key, value]) => ({ op: 'set' as const, path: [key], value: z.json().parse(value) }))
-      if (!await this.scope.mutate(operations, this.baseline)) throw new Error('Configuration refused')
+      const operations = Object.entries(candidate).filter(([key, value]) => key === 'enabled' && credentialEdits.length || JSON.stringify(value) !== JSON.stringify(this.accepted?.[key as keyof MailSettings]))
+        .map(([key, value]) => ({ op: 'set' as const, path: [key], value: z.json().parse(value) }))
+      if (operations.length && !await this.scope.mutate(operations, this.baseline)) throw new Error('Configuration refused')
       const committedRevision = this.scope.getSnapshot().revision
       this.baseline = committedRevision
+      this.accepted = this.scope.getSnapshot().value
       if (this.disposed) return
       if (credentialEdits.length) {
         const paused = await this.api.getStatus()

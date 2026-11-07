@@ -75,15 +75,21 @@ test('POP3 UIDLs survive receiver restart, deletions and message renumbering', a
   assert.deepEqual(server.commands.filter(command => command.name === 'RETR').map(command => command.argument), ['1', '2', '2'])
 })
 
-test('POP3 preserves UTF-8, raw MIME and dot-prefixed lines used by DKIM', async () => {
+test('POP3 preserves UTF-8, non-UTF-8 MIME octets and dot-prefixed lines used by DKIM', async () => {
   await using resources = new AsyncDisposableStack()
   const server = await pop3Server(resources, 'starttls')
   server.behavior.fragment = true
   const raw = Buffer.concat([message('[DSH] 原始邮件', '.first\r\n..second\r\n你好，世界。'), Buffer.from('\r\n')])
+  const legacy = Buffer.concat([
+    Buffer.from(message('[DSH] legacy encoding', '8-bit body: ', ['Content-Transfer-Encoding: 8bit']).toString().replace('charset=utf-8', 'charset=iso-8859-1')),
+    Buffer.from([0xe9, 0xff, 0x80, 13, 10]),
+  ])
   server.messages.push({ uid: 'raw', raw })
+  server.messages.push({ uid: 'legacy', raw: legacy })
   const client = await Pop3Connection.open(reception(server), 'testpass', 2_000, new AbortController().signal)
   resources.defer(() => client.close())
   assert.deepEqual(await client.retrieve(1, raw.length), raw)
+  assert.deepEqual(await client.retrieve(2, legacy.length), legacy)
   await client.quit()
 })
 

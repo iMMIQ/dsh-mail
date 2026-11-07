@@ -6,6 +6,7 @@ import { MailRuntime } from '../src/runtime.ts'
 import { ImapReceiver, smtpSender } from '../src/transports.ts'
 import { verifySender } from '../src/auth.ts'
 import { parseMail } from '../src/mail.ts'
+import { outboundMessage } from '../src/outbound.ts'
 import { fixture, message } from './helpers.ts'
 import { mailServers, waitFor } from './network.ts'
 
@@ -49,7 +50,8 @@ for (const behavior of ['reject', 'drop'] as const) {
     const f = await fixture(t)
     await f.runtime.admit(f.delivery()); await f.finish()
     Object.assign(f.config.accounts[0]!.send!, { host: '127.0.0.1', port: servers.smtpPort, ca: servers.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
-    const outcome = await smtpSender(f.config, async () => 'testpass')(f.store.tasks()[0]!, new AbortController().signal)
+    const task = f.store.tasks()[0]!
+    const outcome = await smtpSender(f.config, async () => 'testpass')(outboundMessage(task, task.outbox, f.config), new AbortController().signal)
     assert.equal(servers.received.length, 1)
     assert.equal(outcome.state, behavior === 'reject' ? 'failed' : 'unknown')
     if (outcome.state === 'failed') assert.equal(outcome.retryable, true)

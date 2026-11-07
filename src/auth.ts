@@ -20,7 +20,7 @@ export async function verifySender(raw: Buffer, mail: Mail, policy: SenderPolicy
       if (/[()"\\\r\n]/.test(value)) continue
       const [server, ...results] = value.split(';').map(s => s.trim())
       if (!server || !policy.authservIds.some(s => s.toLowerCase() === server.toLowerCase())) continue
-      if (results.some(r => new RegExp(`^dmarc=pass\\s+header\\.from=${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i').test(r))) return
+      if (results.some(r => new RegExp(`^dmarc=pass\\s+header\\.from=${RegExp.escape(domain)}$`, 'i').test(r))) return
     }
     throw new MailError('trusted-mta-evidence-missing')
   }

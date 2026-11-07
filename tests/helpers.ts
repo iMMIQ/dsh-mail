@@ -10,7 +10,7 @@ import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { Config } from '../src/config.ts'
 import { DomainMailStore, Spool } from '../src/store.ts'
 import { MailRuntime } from '../src/runtime.ts'
-import type { RuntimeDependencies, Delivery, TaskRecord } from '../src/types.ts'
+import type { RuntimeDependencies, Delivery, TaskRecord, OutboundMessage } from '../src/types.ts'
 
 /** A syntactically real message whose MTA assertion is accepted only by explicit policy. */
 export function message(subject = '[DSH] report', body = 'Summarize the repository.', headers: string[] = []): Buffer {
@@ -57,7 +57,7 @@ export async function fixture(t: AsyncDisposableStack, override: Partial<Runtime
   const config = configuration(directory)
   let now = Date.now()
   const executed: TaskRecord[] = []
-  const sent: TaskRecord[] = []
+  const sent: OutboundMessage[] = []
   const reports: string[] = []
   const deps: RuntimeDependencies = { store, executor: { async validate() {}, async execute(task) {
     executed.push(task); return { state: 'succeeded', summary: 'Repository summarized.', reason: '' }

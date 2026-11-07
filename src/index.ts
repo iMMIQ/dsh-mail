@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Cordis bundle entry: persistent mail conversations and notifications for root DSH Sessions. */
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AsyncDisposableStack } from '@whatwg-node/disposablestack'
 import { open } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -22,6 +21,12 @@ import { SessionNotifications } from './notifications.ts'
 import { canonicalWorkspace } from './workspace.ts'
 import type {} from '@deepseek-ai/dsh-commands'
 
+async function resolveSecret(ctx: Context, reference: string): Promise<string> {
+  const value = await ctx.credentials.resolve(credentialRef(reference))
+  if (!value?.value) throw new MailError('credential-missing')
+  return value.value
+}
+
 export { PluginConfig as Config } from './settings.ts'
 export type { MailSettings, LiveSettings } from './settings.ts'
 export { MailRuntime } from './runtime.ts'
@@ -34,7 +39,7 @@ export class MailAutomation extends TypertRemoteService {
   static Config = PluginConfig
   static inject = ['agents', 'agentDefaultModel', 'agentPresets', 'permissionPresets', 'sessionTitle', 'workspaceRegistry', 'sessions', 'sessionPersistence', 'tools', 'storageDomain', 'credentials', 'commands']
   private runtime: MailRuntime | undefined
-  private resources: InstanceType<typeof AsyncDisposableStack> | undefined
+  private resources: AsyncDisposableStack | undefined
   private changes: Promise<void> = Promise.resolve()
   private phase: MailStatus['phase'] = 'paused'
   private readonly shutdown = new AbortController()
@@ -137,40 +142,29 @@ export class MailAutomation extends TypertRemoteService {
     const spool = new Spool(config.stateDirectory)
     await spool.open(config.runtime.lockStaleMs)
     resources.defer(() => spool.close())
-    let store: DomainMailStore | undefined
-    let runtime: MailRuntime | undefined
-    let timer: ReturnType<typeof setInterval> | undefined
-    store = await DomainMailStore.open(ctx.storageDomain)
-    const ownedStore = store
-    resources.defer(() => ownedStore.close())
-    const secret = async (reference: string): Promise<string> => {
-      const value = await ctx.credentials.resolve(credentialRef(reference))
-      if (!value?.value) throw new MailError('credential-missing')
-      return value.value
-    }
-    runtime = new MailRuntime(config, spool, { store, executor: new DshExecutor(ctx),
+    const store = await DomainMailStore.open(ctx.storageDomain)
+    resources.defer(() => store.close())
+    const secret = (reference: string): Promise<string> => resolveSecret(ctx, reference)
+    const runtime = new MailRuntime(config, spool, { store, executor: new DshExecutor(ctx),
       verify: (raw, mail, policy, signal) => verifySender(raw, mail, policy, signal, config.runtime.connectionTimeoutMs), send: smtpSender(config, secret),
       report: (code, id) => ctx.logger.error(`dsh-mail: ${code}; ${id}; inspect mail-status before resuming`),
     })
     this.runtime = runtime
-    const ownedRuntime = runtime
-    resources.defer(() => ownedRuntime.close())
+    resources.defer(() => runtime.close())
     await runtime.initialize()
-    const active = runtime
     if (config.notifications.enabled) {
-      const notifications = new SessionNotifications(ctx, active)
+      const notifications = new SessionNotifications(ctx, runtime)
       resources.defer(() => notifications.close())
       await notifications.start()
     }
     for (const account of config.accounts.filter(a => a.receive)) {
-      const receiver = account.receive?.protocol === 'pop3' ? new Pop3Receiver(account, config, active, secret) : new ImapReceiver(account, config, active, secret)
+      const receiver = account.receive?.protocol === 'pop3' ? new Pop3Receiver(account, config, runtime, secret) : new ImapReceiver(account, config, runtime, secret)
       resources.defer(() => receiver.close())
       receiver.start()
     }
-    timer = setInterval(() => { void active.tick() }, config.runtime.tickIntervalMs)
-    const ownedTimer = timer
-    resources.defer(() => clearInterval(ownedTimer))
-    await active.tick()
+    const timer = setInterval(() => { void runtime.tick() }, config.runtime.tickIntervalMs)
+    resources.defer(() => clearInterval(timer))
+    await runtime.tick()
   }
   /** Read health after the latest accepted configuration has finished applying.
    * @returns Connection health without messages, passwords or credential values.
@@ -192,11 +186,7 @@ export class MailAutomation extends TypertRemoteService {
     if (!account) throw new MailError('account-not-found')
     const signal = this.ctx.invocation?.signal
     const cancellation = signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal
-    const task = checkAccountConnection(account, async ref => {
-      const value = await this.ctx.credentials.resolve(credentialRef(ref))
-      if (!value?.value) throw new MailError('credential-missing')
-      return value.value
-    }, settings.runtime.connectionTimeoutMs, cancellation)
+    const task = checkAccountConnection(account, ref => resolveSecret(this.ctx, ref), settings.runtime.connectionTimeoutMs, cancellation)
     this.checks.add(task)
     try { return await task } finally { this.checks.delete(task) }
   }

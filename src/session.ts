@@ -5,7 +5,7 @@ import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { createUserMessage, type MessageId } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-permission-presets'
@@ -13,8 +13,9 @@ import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { Rule } from './config.ts'
+import { observeTurn, type TurnObservation } from './turn-observation.ts'
 import { taskWorkspace } from './workspace.ts'
-import { MailError, resultSchema, type ExecutionResult, type RunReport, type TaskExecutor, type TaskRecord, type TaskResult } from './types.ts'
+import { MailError, resultSchema, type ExecutionResult, type TaskExecutor, type TaskRecord, type TaskResult } from './types.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -60,12 +61,7 @@ export class DshExecutor implements TaskExecutor {
     let presetScope: AsyncDisposable | undefined
     let off: (() => void) | undefined
     let candidate: TaskResult | undefined
-    let ending: TurnEndReason['kind'] | undefined
-    let lastOutput = ''
-    let finalText = ''
-    let steps = 0
-    let observedTurn: { time: number; turn: number; steps: number } | undefined
-    const report: RunReport = { steps: 0 }
+    let observation: TurnObservation = { report: { steps: 0 }, lastOutput: '', finalText: '' }
     let entered = false
     const done = Promise.withResolvers<void>()
     const abort = (): void => {
@@ -111,23 +107,15 @@ export class DshExecutor implements TaskExecutor {
       }
       const current = agent
       off = this.ctx.on('session/event', (session, event) => {
-        if (session.id !== sessionId) return
-        if (event.type === 'turn/start') observedTurn = { time: event.time, turn: event.data.turn, steps: 0 }
-        if (event.type === 'step/start' && observedTurn) observedTurn.steps++
+        if (session.id !== sessionId || observation.ending !== undefined || event.type === 'turn/end' && !entered) return
+        observation = observeTurn(observation, event) ?? observation
         if (event.type === 'user/message' && event.data.id === messageId) {
-          entered = true; report.startedAt = observedTurn?.time ?? event.time; report.steps = steps = observedTurn?.steps ?? 0
-          if (observedTurn) report.turn = observedTurn.turn
+          entered = true
+          observation = { ...observation, report: { ...observation.report, startedAt: observation.report.startedAt ?? event.time } }
         }
         if (!entered) return
-        if (event.type === 'step/start') { report.steps = steps = observedTurn?.steps ?? steps + 1; report.turn = event.data.turn; if (steps > task.rule.task.maxSteps) current.cancel({ kind: 'user' }) }
-        if (event.type === 'assistant/message') {
-          report.provider = event.data.message.source.provider
-          report.model = event.data.message.source.model
-          const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
-          if (text) lastOutput = text
-          finalText = event.data.message.content.some(block => block.type === 'tool-call') ? '' : text
-        }
-        if (event.type === 'turn/end') { ending = event.data.reason.kind; report.finishedAt = event.time; entered = false; done.resolve() }
+        if (event.type === 'step/start' && observation.report.steps > task.rule.task.maxSteps) current.cancel({ kind: 'user' })
+        if (event.type === 'turn/end') { entered = false; done.resolve() }
       })
       signal.addEventListener('abort', abort, { once: true })
       signal.throwIfAborted()
@@ -137,6 +125,8 @@ export class DshExecutor implements TaskExecutor {
       await done.promise
       if (signal.aborted && handle) await current.whenIdle()
       if (!await this.ctx.sessions.flush(current.session)) throw new MailError('session-persistence-unavailable')
+      const { ending, report, lastOutput, finalText } = observation
+      const steps = report.steps
       if (signal.aborted || ending === 'aborted' || steps > task.rule.task.maxSteps) return { state: 'cancelled', summary: 'Task stopped before completion.', reason: steps > task.rule.task.maxSteps ? 'step-budget-exhausted' : 'cancelled', lastOutput, report }
       if (ending === 'error') return { state: 'failed', summary: 'Agent execution failed. Inspect the DSH session for details.', reason: 'agent-execution-error', lastOutput, report }
       if (ending !== 'completed') return { state: 'needs_attention', summary: 'The Agent stopped before normal completion. Inspect the DSH session.', reason: `turn-${ending ?? 'missing'}`, lastOutput, report }

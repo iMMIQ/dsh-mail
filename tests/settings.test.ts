@@ -43,3 +43,19 @@ test('connection checks verify actual TLS login without sending a message', asyn
   assert.deepEqual(await checkConnection(account, async () => 'incorrect', 2_000, new AbortController().signal), { imap: 'failed', smtp: 'failed' })
   assert.equal(servers.received.length, 0)
 })
+
+
+test('shared connection validation rejects URLs, blank logins and private CA keys on Host writes', () => {
+  const config = configuration('/tmp/dsh-mail-shared-validation')
+  for (const patch of [{ host: 'https://mail.example.com' }, { auth: { user: ' ', credentialRef: 'MAIL_PASSWORD' } }, { ca: '-----BEGIN PRIVATE KEY-----\nnot-a-public-certificate' }]) {
+    const account = { ...config.accounts[0]!, receive: { ...config.accounts[0]!.receive!, ...patch } }
+    assert.equal(settingsSchema.safeParse({ ...config, accounts: [account], enabled: false }).success, false)
+  }
+})
+
+test('Host settings retain absolute path checks when using browser-safe schemas', () => {
+  const config = configuration('/tmp/dsh-mail-shared-paths')
+  assert.equal(settingsSchema.safeParse({ ...config, stateDirectory: 'relative/state', enabled: false }).success, false)
+  const rule = { ...config.rules[0]!, task: { ...config.rules[0]!.task, workspacePath: 'relative/project' } }
+  assert.equal(settingsSchema.safeParse({ ...config, rules: [rule], enabled: false }).success, false)
+})

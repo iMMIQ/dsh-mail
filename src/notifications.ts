@@ -2,35 +2,26 @@
 /** Observe root turns without owning their Agents or changing their execution. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import type { RunReport } from './types.ts'
+import { observeTurn, type TurnObservation } from './turn-observation.ts'
 import type { MailRuntime } from './runtime.ts'
 
-interface Turn { report: RunReport; turn: number; mail: boolean; lastOutput: string; finalText: string }
+interface Turn { observation: TurnObservation; mail: boolean }
 
 /** Fold just the current turn; historical input and reasoning are never copied into notices. */
 function observe(turns: Map<SessionId, Turn>, header: SessionHeader, event: SessionEvent) {
   if (header.origin === 'subagent') return
-  if (event.type === 'turn/start') turns.set(header.id, { report: { startedAt: event.time, steps: 0, turn: event.data.turn }, turn: event.data.turn, mail: false, lastOutput: '', finalText: '' })
-  const turn = turns.get(header.id)
-  if (!turn) return
-  if (event.type === 'user/message' && event.data.source?.kind === 'dsh-mail') turn.mail = true
-  if (event.type === 'step/start') turn.report.steps = (turn.report.steps ?? 0) + 1
-  if (event.type === 'assistant/message') {
-    turn.report.provider = event.data.message.source.provider
-    turn.report.model = event.data.message.source.model
-    const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
-    if (text) turn.lastOutput = text
-    turn.finalText = event.data.message.content.some(block => block.type === 'tool-call') ? '' : text
-  }
-  if (event.type !== 'turn/end') return
+  const previous = turns.get(header.id)
+  const observation = observeTurn(previous?.observation, event)
+  if (!observation) return
+  const turn = { observation, mail: event.type === 'turn/start' ? false : previous?.mail === true || event.type === 'user/message' && event.data.source.kind === 'dsh-mail' }
+  if (event.type !== 'turn/end') { turns.set(header.id, turn); return }
   turns.delete(header.id)
-  if (turn.mail || event.data.turn !== turn.turn) return
-  turn.report.finishedAt = event.time
-  const kind = event.data.reason.kind
-  const state = kind === 'completed' && turn.finalText ? 'succeeded' as const
+  if (turn.mail || event.data.turn !== observation.report.turn) return
+  const kind = observation.ending
+  const state = kind === 'completed' && observation.finalText ? 'succeeded' as const
     : kind === 'error' ? 'failed' as const : kind === 'aborted' ? 'cancelled' as const : 'needs_attention' as const
-  return { report: turn.report, sessionId: header.id, turn: turn.turn,
-    ...(header.cwd ? { workspacePath: header.cwd } : {}), state, lastOutput: turn.lastOutput, reason: state === 'succeeded' ? '' : `turn-${kind}` }
+  return { report: observation.report, sessionId: header.id, turn: event.data.turn,
+    ...(header.cwd ? { workspacePath: header.cwd } : {}), state, lastOutput: observation.lastOutput, reason: state === 'succeeded' ? '' : `turn-${kind}` }
 }
 
 /** Event subscriptions and their queued durability work share the runtime's lifetime. */

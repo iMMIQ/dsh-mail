@@ -109,10 +109,16 @@ export interface ExecutionResult {
 
 /** Synchronous reads and durable writes owned by one runtime. */
 export interface MailStore {
+  getInbox(id: MailId): InboxRecord | undefined
+  getTask(id: TaskId): TaskRecord | undefined
+  readonly inboxCount: number
+  readonly taskCount: number
   inbox(): readonly InboxRecord[]
   tasks(): readonly TaskRecord[]
   putInbox(record: InboxRecord): Promise<void>
   putTask(record: TaskRecord): Promise<void>
+  /** Transform the record current at the domain's serialized write slot. */
+  updateTask(id: TaskId, update: (record: TaskRecord) => TaskRecord): Promise<TaskRecord>
   cursor(key: string): { validity: string; high: number } | undefined
   putCursor(key: string, value: { validity: string; high: number }): Promise<void>
   close(): Promise<void>
@@ -129,12 +135,26 @@ export interface TaskExecutor {
 /** SMTP result preserves uncertainty after an attempted submission. */
 export type SendOutcome = { state: 'accepted' } | { state: 'failed'; retryable: boolean; reason: string } | { state: 'unknown'; reason: string }
 
+/** A frozen receipt or result ready for SMTP; execution state never reaches the sender. */
+export interface OutboundMessage {
+  account: string
+  to: string
+  replyTo?: string
+  taskId: TaskId
+  subject: string
+  text: string
+  html?: string
+  messageId: string
+  inReplyTo?: string
+  references: string[]
+}
+
 /** External operations supplied by production adapters or instance-local fixtures. */
 export interface RuntimeDependencies {
   store: MailStore
   executor: TaskExecutor
   verify(raw: Buffer, mail: Mail, policy: import('./config.ts').SenderPolicy, signal: AbortSignal): Promise<void>
-  send(task: TaskRecord, signal: AbortSignal): Promise<SendOutcome>
+  send(message: OutboundMessage, signal: AbortSignal): Promise<SendOutcome>
   report(code: string, id: string): void
   now?: () => number
 }

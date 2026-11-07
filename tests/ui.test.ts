@@ -11,6 +11,7 @@ class Form implements ConfigForm<MailSettings> {
   state: ConfigFormSnapshot<MailSettings> & { mode: 'host' }
   listeners = new Set<() => void>()
   writes: unknown[] = []
+  mutations: Parameters<ConfigForm<MailSettings>['mutate']>[0][] = []
   refuse = false
   constructor(value = settingsSchema.parse({ ...configuration('/tmp/mail-ui'), enabled: true })) { this.state = { status: 'ready', mode: 'host', value, base: {}, user: {}, revision: 1, writable: true } }
   getSnapshot() { return this.state }
@@ -21,6 +22,7 @@ class Form implements ConfigForm<MailSettings> {
     if (this.refuse || expected !== this.state.revision) return false
     const candidate = { ...this.state.value }
     for (const op of operations) { assert.equal(op.path.length, 1); if (op.op === 'set') Object.assign(candidate, { [op.path[0]!]: op.value }) }
+    this.mutations.push(structuredClone(operations))
     this.writes.push(structuredClone(candidate))
     this.state = { ...this.state, value: settingsSchema.parse(candidate), revision: this.state.revision! + 1 }
     for (const listener of this.listeners) listener()
@@ -394,5 +396,45 @@ test('a failed POP3 connection prevents save-and-enable from starting mail', asy
     await page.start()
     assert.equal(scope.state.value!.enabled, true)
     assert.equal(page.store.getSnapshot().toast?.message, 'started')
+  } finally { await page.dispose() }
+})
+
+
+test('saving a rule edit writes only changed top-level settings and preserves inherited values', async () => {
+  const { page, scope } = fixture()
+  try {
+    page.editRule('subjectContains', 'review')
+    await page.save()
+    assert.deepEqual(scope.mutations.map(operations => operations.map(operation => operation.path)), [[['rules']]])
+    assert.equal(scope.state.value!.rules[0]!.match.subjectContains, 'review')
+    assert.equal(page.store.getSnapshot().dirty, false)
+  } finally { await page.dispose() }
+})
+
+test('a credential-only save fences the pause without writing unrelated configuration', async () => {
+  const { page, scope } = fixture()
+  try {
+    await page.refreshCredentials()
+    page.editCredential('MAIL_PASSWORD', 'SYNTHETIC_TEST_CODE')
+    await page.save()
+    assert.deepEqual(scope.mutations.map(operations => operations.map(operation => operation.path)), [[['enabled']], [['enabled']]])
+    assert.equal(scope.state.value!.enabled, true)
+  } finally { await page.dispose() }
+})
+
+test('shared validation rejects unknown template fields and retains incomplete numeric text', async () => {
+  const { page } = fixture()
+  try {
+    page.editRule('template', '{{not_a_template_field}}')
+    assert.equal(page.store.getSnapshot().invalid, true)
+    page.editRule('template', '{{body}}')
+    assert.equal(page.store.getSnapshot().invalid, false)
+    const port = page.store.getSnapshot().draft!.accounts[0]!.receive!.port
+    page.editAccount('receive.port', '12x')
+    assert.equal(page.store.getSnapshot().fields['account.work.receive.port'], '12x')
+    assert.equal(page.store.getSnapshot().draft!.accounts[0]!.receive!.port, port)
+    assert.equal(page.store.getSnapshot().invalid, true)
+    page.editAccount('receive.port', String(port))
+    assert.equal(page.store.getSnapshot().invalid, false)
   } finally { await page.dispose() }
 })
