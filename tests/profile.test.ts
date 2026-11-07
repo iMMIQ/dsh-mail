@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
+import { simpleParser } from 'mailparser'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir, rename } from 'node:fs/promises'
@@ -15,7 +16,7 @@ import { mailServers, waitFor } from './network.ts'
 
 const host = z.object({ version: z.string(), dependencies: z.record(z.string(), z.string()) }).parse(JSON.parse(await readFile(resolve('node_modules/@deepseek-ai/dsh/package.json'), 'utf8')))
 
-async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure' | 'conversation' | 'external'): Promise<void> {
+async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure' | 'conversation' | 'external' | 'markdown'): Promise<void> {
   const success = scenario === 'success' || scenario === 'reconfigure'
   await using resources = new AsyncDisposableStack()
   const root = await mkdtemp(join(tmpdir(), 'dsh-mail-profile-'))
@@ -115,6 +116,10 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     } else send('initial', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nRemember amber.`)
     await waitResults(1)
     const first = (await results())[0]!
+    const firstMime = await simpleParser(servers.received.find(raw => raw.toString().includes('multipart/alternative'))!)
+    assert.equal(typeof firstMime.html, 'string')
+    assert.match(String(firstMime.html), /任务执行报告/)
+    assert.match(String(firstMime.html), /mail-fixture/)
     assert.match(first.body, /Remembered amber/)
     assert.ok(first.messageId)
     const sessionId = /Session: ([^\n]+)/.exec(first.body)![1]!.trim()
@@ -175,6 +180,18 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   }
   servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`).toString())
   await waitFor(() => servers.received.length === 1, () => `result mail; ${output}`)
+  const mime = await simpleParser(servers.received[0]!)
+  assert.equal(typeof mime.html, 'string')
+  assert.match(String(mime.html), /任务执行报告/)
+  assert.match(String(mime.html), /mail-fixture/)
+  assert.match(String(mime.html), /执行步数/)
+  assert.equal(Number(/执行步数<\/td><td[^>]*>(\d+)<\/td>/.exec(String(mime.html))?.[1]), success ? 3 : scenario === 'model-error' ? 2 : 1)
+  if (scenario === 'markdown') {
+    assert.match(String(mime.html), /<h2 style=/)
+    assert.match(String(mime.html), /<table[^>]*style="border-collapse/)
+    assert.match(String(mime.html), /<pre style=/)
+    assert.match(String(mime.html), /href="https:\/\/example.com\/report"/)
+  }
   const response = await parseMail(servers.received[0]!, config.runtime)
   const readResult = async (path: string): Promise<string> => {
     try { return await readFile(path, 'utf8') }
@@ -209,7 +226,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   assert.equal(z.object({ cwd: z.string() }).parse(events[0]).cwd, emailDirectory)
   const actual = { input: users[0]!.data.content.map(part => part.text).join('').replace(emailDirectory, '{{workspace}}'), calls, turnEnds: ends, permissions,
     reply: response.body.replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(/Session: mail-[a-f0-9]{64}/, 'Session: {{sessionId}}').replace(emailDirectory, '{{workspace}}').trim() }
-  const snapshots = { success: 'mail-turn', 'text-only': 'mail-text-result', 'empty-result': 'mail-missing-result', 'model-error': 'mail-error', reconfigure: 'mail-turn' }
+  const snapshots = { success: 'mail-turn', 'text-only': 'mail-text-result', 'empty-result': 'mail-missing-result', 'model-error': 'mail-error', reconfigure: 'mail-turn', markdown: 'mail-markdown' }
   const expected: unknown = JSON.parse(await readFile(resolve(`tests/snapshots/${snapshots[scenario]}.json`), 'utf8'))
   assert.deepEqual(actual, expected)
   assert.doesNotMatch(response.body, /PRIVATE_FIXTURE_REASONING/)
@@ -235,3 +252,5 @@ test('live configuration stops and restarts the mail runtime without replaying o
 
 test('email replies preserve one real DSH conversation through queueing and a process restart', () => profileScenario('conversation'), 90_000)
 test('a non-mail DSH session notifies, accepts replies and preserves its original permissions across restart', () => profileScenario('external'), 90_000)
+
+test('a real DSH Markdown response is delivered as styled HTML with its original plain-text alternative', () => profileScenario('markdown'), 60_000)

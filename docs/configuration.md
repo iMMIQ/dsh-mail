@@ -85,4 +85,4 @@ senderPolicies:
 | `maxTaskBytes` / `maxReplyBytes` | 65536（64 KiB） |
 | `maxAttachmentBytes` / `maxAttachments` | 5242880（5 MiB）/ 5 |
 
-`maxReplyBytes` 限制结果正文的 UTF-8 字节数，超出部分会明确标注已缩短。完整字段、取值范围和默认值见[配置定义](../src/config.ts)。
+`maxReplyBytes` 分别限制纯文本与 HTML 正文的 UTF-8 字节数，超出部分会明确标注已缩短。预算不足以容纳 HTML 模板时只发送纯文本。HTML 不加载远程图片；执行时间以 UTC 标注，耗时、模型和步数仅展示实际记录到的值。完整字段、取值范围和默认值见[配置定义](../src/config.ts)。

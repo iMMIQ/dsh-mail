@@ -62,7 +62,17 @@ const outboxSchema = z.strictObject({
   state: z.enum(['none', 'pending', 'sending', 'accepted', 'failed', 'unknown']),
   messageId: z.string(), attempts: z.number().int(), nextAt: z.number(),
   subject: z.string(), text: z.string(), reason: z.string(),
+  html: z.string().optional(),
 })
+
+/** Observed execution facts; missing counters are never represented as zero usage. */
+export const reportSchema = z.strictObject({
+  startedAt: z.number().nonnegative().optional(), finishedAt: z.number().nonnegative().optional(),
+  steps: z.number().int().nonnegative().optional(), turn: z.number().int().nonnegative().optional(),
+  provider: z.string().optional(), model: z.string().optional(),
+})
+/** Execution facts included in a result email when the owner recorded them. */
+export type RunReport = z.infer<typeof reportSchema>
 
 /** Atomically stores execution settlement and the corresponding outbox entry. */
 export const taskSchema = z.strictObject({
@@ -74,6 +84,7 @@ export const taskSchema = z.strictObject({
   state: z.enum(['queued', 'starting', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention']),
   summary: z.string(), reason: z.string(), attempt: z.number().int(),
   lastOutput: z.string().optional(),
+  report: reportSchema.optional(),
   sequence: z.number().int().nonnegative().optional(),
   continuation: z.boolean().optional(),
   origin: z.literal('session').optional(),
@@ -93,6 +104,7 @@ export interface ExecutionResult {
   summary: string
   reason: string
   lastOutput?: string
+  report?: RunReport
 }
 
 /** Synchronous reads and durable writes owned by one runtime. */

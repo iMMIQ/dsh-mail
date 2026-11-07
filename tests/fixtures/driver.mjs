@@ -36,6 +36,13 @@ export function apply(ctx, config) {
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
+      if (config.scenario === 'markdown') {
+        const text = (await readFile(new URL('./markdown-response.md', import.meta.url), 'utf8')).trim()
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       if (config.scenario === 'text-only') {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Analysis completed without the result tool.' } }

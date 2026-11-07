@@ -14,7 +14,7 @@ import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { Rule } from './config.ts'
 import { taskWorkspace } from './workspace.ts'
-import { MailError, resultSchema, type ExecutionResult, type TaskExecutor, type TaskRecord, type TaskResult } from './types.ts'
+import { MailError, resultSchema, type ExecutionResult, type RunReport, type TaskExecutor, type TaskRecord, type TaskResult } from './types.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -64,6 +64,8 @@ export class DshExecutor implements TaskExecutor {
     let lastOutput = ''
     let finalText = ''
     let steps = 0
+    let observedTurn: { time: number; turn: number; steps: number } | undefined
+    const report: RunReport = { steps: 0 }
     let entered = false
     const done = Promise.withResolvers<void>()
     const abort = (): void => {
@@ -110,15 +112,22 @@ export class DshExecutor implements TaskExecutor {
       const current = agent
       off = this.ctx.on('session/event', (session, event) => {
         if (session.id !== sessionId) return
-        if (event.type === 'user/message' && event.data.id === messageId) entered = true
+        if (event.type === 'turn/start') observedTurn = { time: event.time, turn: event.data.turn, steps: 0 }
+        if (event.type === 'step/start' && observedTurn) observedTurn.steps++
+        if (event.type === 'user/message' && event.data.id === messageId) {
+          entered = true; report.startedAt = observedTurn?.time ?? event.time; report.steps = steps = observedTurn?.steps ?? 0
+          if (observedTurn) report.turn = observedTurn.turn
+        }
         if (!entered) return
-        if (event.type === 'step/start' && ++steps > task.rule.task.maxSteps) current.cancel({ kind: 'user' })
+        if (event.type === 'step/start') { report.steps = steps = observedTurn?.steps ?? steps + 1; report.turn = event.data.turn; if (steps > task.rule.task.maxSteps) current.cancel({ kind: 'user' }) }
         if (event.type === 'assistant/message') {
+          report.provider = event.data.message.source.provider
+          report.model = event.data.message.source.model
           const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
           if (text) lastOutput = text
           finalText = event.data.message.content.some(block => block.type === 'tool-call') ? '' : text
         }
-        if (event.type === 'turn/end') { ending = event.data.reason.kind; entered = false; done.resolve() }
+        if (event.type === 'turn/end') { ending = event.data.reason.kind; report.finishedAt = event.time; entered = false; done.resolve() }
       })
       signal.addEventListener('abort', abort, { once: true })
       signal.throwIfAborted()
@@ -128,12 +137,12 @@ export class DshExecutor implements TaskExecutor {
       await done.promise
       if (signal.aborted && handle) await current.whenIdle()
       if (!await this.ctx.sessions.flush(current.session)) throw new MailError('session-persistence-unavailable')
-      if (signal.aborted || ending === 'aborted' || steps > task.rule.task.maxSteps) return { state: 'cancelled', summary: 'Task stopped before completion.', reason: steps > task.rule.task.maxSteps ? 'step-budget-exhausted' : 'cancelled', lastOutput }
-      if (ending === 'error') return { state: 'failed', summary: 'Agent execution failed. Inspect the DSH session for details.', reason: 'agent-execution-error', lastOutput }
-      if (ending !== 'completed') return { state: 'needs_attention', summary: 'The Agent stopped before normal completion. Inspect the DSH session.', reason: `turn-${ending ?? 'missing'}`, lastOutput }
-      if (candidate) return { state: candidate.status, summary: candidate.summary, reason: '', lastOutput }
-      if (finalText) return { state: 'succeeded', summary: 'Agent completed normally.', reason: '', lastOutput }
-      return { state: 'needs_attention', summary: 'No final text response or structured result was recorded. Inspect the DSH session.', reason: 'missing-completed-result', lastOutput }
+      if (signal.aborted || ending === 'aborted' || steps > task.rule.task.maxSteps) return { state: 'cancelled', summary: 'Task stopped before completion.', reason: steps > task.rule.task.maxSteps ? 'step-budget-exhausted' : 'cancelled', lastOutput, report }
+      if (ending === 'error') return { state: 'failed', summary: 'Agent execution failed. Inspect the DSH session for details.', reason: 'agent-execution-error', lastOutput, report }
+      if (ending !== 'completed') return { state: 'needs_attention', summary: 'The Agent stopped before normal completion. Inspect the DSH session.', reason: `turn-${ending ?? 'missing'}`, lastOutput, report }
+      if (candidate) return { state: candidate.status, summary: candidate.summary, reason: '', lastOutput, report }
+      if (finalText) return { state: 'succeeded', summary: 'Agent completed normally.', reason: '', lastOutput, report }
+      return { state: 'needs_attention', summary: 'No final text response or structured result was recorded. Inspect the DSH session.', reason: 'missing-completed-result', lastOutput, report }
     } finally {
       signal.removeEventListener('abort', abort)
       off?.()

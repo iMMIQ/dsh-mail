@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
+import { simpleParser } from 'mailparser'
 import { MailRuntime } from '../src/runtime.ts'
 import { ImapReceiver, smtpSender } from '../src/transports.ts'
 import { verifySender } from '../src/auth.ts'
@@ -29,6 +30,10 @@ test('real TLS IMAP reception executes and submits a threaded SMTP result', asyn
   await runtime.tick(); await runtime.whenSettled(); await runtime.tick()
   assert.equal(f.executed.length, 1)
   assert.equal(servers.received.length, 1)
+  const mime = await simpleParser(servers.received[0]!)
+  assert.equal(typeof mime.html, 'string')
+  assert.match(String(mime.html), /任务执行报告/)
+  assert.ok(mime.headerLines.some(header => header.key === 'content-type' && header.line.includes('multipart/alternative')))
   const response = await parseMail(servers.received[0]!, f.config.runtime)
   assert.equal(response.to[0], 'owner@example.com')
   assert.match(response.body, /Status: succeeded/)

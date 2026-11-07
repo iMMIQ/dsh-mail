@@ -2,18 +2,22 @@
 /** Observe root turns without owning their Agents or changing their execution. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import type { RunReport } from './types.ts'
 import type { MailRuntime } from './runtime.ts'
 
-interface Turn { turn: number; mail: boolean; lastOutput: string; finalText: string }
+interface Turn { report: RunReport; turn: number; mail: boolean; lastOutput: string; finalText: string }
 
 /** Fold just the current turn; historical input and reasoning are never copied into notices. */
 function observe(turns: Map<SessionId, Turn>, header: SessionHeader, event: SessionEvent) {
   if (header.origin === 'subagent') return
-  if (event.type === 'turn/start') turns.set(header.id, { turn: event.data.turn, mail: false, lastOutput: '', finalText: '' })
+  if (event.type === 'turn/start') turns.set(header.id, { report: { startedAt: event.time, steps: 0, turn: event.data.turn }, turn: event.data.turn, mail: false, lastOutput: '', finalText: '' })
   const turn = turns.get(header.id)
   if (!turn) return
   if (event.type === 'user/message' && event.data.source?.kind === 'dsh-mail') turn.mail = true
+  if (event.type === 'step/start') turn.report.steps = (turn.report.steps ?? 0) + 1
   if (event.type === 'assistant/message') {
+    turn.report.provider = event.data.message.source.provider
+    turn.report.model = event.data.message.source.model
     const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
     if (text) turn.lastOutput = text
     turn.finalText = event.data.message.content.some(block => block.type === 'tool-call') ? '' : text
@@ -21,10 +25,11 @@ function observe(turns: Map<SessionId, Turn>, header: SessionHeader, event: Sess
   if (event.type !== 'turn/end') return
   turns.delete(header.id)
   if (turn.mail || event.data.turn !== turn.turn) return
+  turn.report.finishedAt = event.time
   const kind = event.data.reason.kind
   const state = kind === 'completed' && turn.finalText ? 'succeeded' as const
     : kind === 'error' ? 'failed' as const : kind === 'aborted' ? 'cancelled' as const : 'needs_attention' as const
-  return { sessionId: header.id, turn: turn.turn,
+  return { report: turn.report, sessionId: header.id, turn: turn.turn,
     ...(header.cwd ? { workspacePath: header.cwd } : {}), state, lastOutput: turn.lastOutput, reason: state === 'succeeded' ? '' : `turn-${kind}` }
 }
 
