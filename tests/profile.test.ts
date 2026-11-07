@@ -10,7 +10,7 @@ import { z } from 'zod'
 import { parseMail } from '../src/mail.ts'
 import { Config } from '../src/config.ts'
 import { configuration, message } from './helpers.ts'
-import { mailServers, waitFor } from './network.ts'
+import { mailServers, smtpServer, waitFor } from './network.ts'
 import { pop3Server } from './pop3-network.ts'
 import { profileHost } from './profile-host.ts'
 
@@ -21,8 +21,13 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   await using resources = new AsyncDisposableStack()
   const root = await mkdtemp(join(tmpdir(), 'dsh-mail-profile-'))
   resources.defer(() => rm(root, { recursive: true, force: true }))
-  const servers = await mailServers(resources)
+  const servers = protocol === 'imap' ? await mailServers(resources) : undefined
+  const smtp = servers ?? await smtpServer(resources)
   const pop3 = protocol === 'pop3' ? await pop3Server(resources, 'starttls') : undefined
+  const deliver = (uid: string, raw: Buffer | string): void => {
+    if (pop3) pop3.messages.push({ uid, raw: Buffer.isBuffer(raw) ? raw : Buffer.from(raw) })
+    else { assert.ok(servers); servers.imap.appendMessage('INBOX', [], new Date(), raw.toString()) }
+  }
   const home = join(root, 'home')
   const hostProcess = profileHost(resources, home)
   const profile = join(home, 'profiles', 'mail-test')
@@ -46,9 +51,9 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     config.senderPolicies.trusted = { evidence: 'local-signature', trustedSenders: ['owner@example.com'] }
   }
   config.runtime.tickIntervalMs = 20
-  Object.assign(config.accounts[0]!.receive!, { host: '127.0.0.1', port: servers.imapPort, ca: servers.ca, rescanIntervalMs: 50, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
   if (pop3) config.accounts[0]!.receive = { protocol: 'pop3', host: '127.0.0.1', port: pop3.port, tls: 'starttls', ca: pop3.ca, rescanIntervalMs: 50, initialSync: 'new-only', maxMessageAgeMs: 172_800_000, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } }
-  Object.assign(config.accounts[0]!.send!, { host: '127.0.0.1', port: servers.smtpPort, ca: servers.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
+  else { assert.ok(servers); Object.assign(config.accounts[0]!.receive!, { host: '127.0.0.1', port: servers.imapPort, ca: servers.ca, rescanIntervalMs: 50, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } }) }
+  Object.assign(config.accounts[0]!.send!, { host: '127.0.0.1', port: smtp.smtpPort, ca: smtp.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
   const configs: Record<string, object> = {
     hmr: { root: [] },
     'system-prompt': { personaPrefix: 'Execute the mail task using the available tools.' },
@@ -75,15 +80,14 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     const send = (id: string, body: string, parent?: string): void => {
       const raw = message(parent ? '回复：continue with a different title' : '[DSH] remember', body, parent ? [`In-Reply-To: ${parent}`, `References: ${parent}`] : [])
         .toString().replace('<fixture@example.com>', `<${id}@example.com>`)
-      if (pop3) pop3.messages.push({ uid: id, raw: Buffer.from(raw) })
-      else servers.imap.appendMessage('INBOX', [], new Date(), raw)
+      deliver(id, raw)
     }
     const control = async (id: string, text: string): Promise<void> => {
       await writeFile(join(root, 'control.tmp'), JSON.stringify({ id, text }))
       await rename(join(root, 'control.tmp'), join(root, 'control.json'))
     }
     const results = async () => {
-      const mails = await Promise.all(servers.received.map(raw => parseMail(raw, config.runtime)))
+      const mails = await Promise.all(smtp.received.map(raw => parseMail(raw, config.runtime)))
       return mails.filter(mail => mail.body.includes('Status:'))
     }
     const waitResults = async (count: number) => waitFor(async () => { if (hostProcess.exited) throw new Error(`DSH exited before the result: ${hostProcess.output}`); return (await results()).length >= count }, () => `waiting for ${count} turn emails; ${hostProcess.output}`)
@@ -92,7 +96,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     } else send('initial', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nRemember amber.`)
     await waitResults(1)
     const first = (await results())[0]!
-    const firstMime = await simpleParser(servers.received.find(raw => raw.toString().includes('multipart/alternative'))!)
+    const firstMime = await simpleParser(smtp.received.find(raw => raw.toString().includes('multipart/alternative'))!)
     assert.equal(typeof firstMime.html, 'string')
     assert.match(String(firstMime.html), /任务执行报告/)
     assert.match(String(firstMime.html), /mail-fixture/)
@@ -109,8 +113,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     send('queued', 'Report the remembered color again.', first.messageId)
     const queuedRaw = message('Re: [DSH] duplicate', 'Report the remembered color again.', [`In-Reply-To: ${first.messageId}`]).toString().replace('<fixture@example.com>', '<queued@example.com>')
     // Same Message-ID with different content is quarantined, not executed twice.
-    if (pop3) pop3.messages.push({ uid: 'queued-duplicate', raw: Buffer.from(queuedRaw) })
-    else servers.imap.appendMessage('INBOX', [], new Date(), queuedRaw)
+    deliver('queued-duplicate', queuedRaw)
     await waitFor(async () => {
       const current = z.object({ tasks: z.array(z.object({ state: z.string() })) }).parse(JSON.parse(await readFile(join(root, 'status.json'), 'utf8')))
       return current.tasks.some(task => task.state === 'queued')
@@ -146,17 +149,16 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     assert.ok(events.slice(firstUser).filter(event => event.type === 'permission/preset').every(event => event.data?.preset === expectedPermission))
     assert.equal(events.filter(event => event.type === 'user/message' && ['dsh-mail', 'user'].includes(event.data?.source?.kind ?? '')).length, beforeRestart + 1)
     assert.equal((await results()).length, beforeRestart + 1)
-    const received = await Promise.all(servers.received.map(raw => parseMail(raw, config.runtime)))
+    const received = await Promise.all(smtp.received.map(raw => parseMail(raw, config.runtime)))
     const receipts = received.filter(mail => mail.body.includes('Received and queued.'))
     assert.equal(receipts.length, beforeRestart + 1 - (scenario === 'external' ? 2 : 0))
     assert.ok(received.every(mail => mail.headers.some(header => header.key === 'reply-to' && header.line.includes('bot@example.com'))))
     return
   }
   const taskMail = message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`)
-  if (pop3) pop3.messages.push({ uid: 'profile-task', raw: taskMail })
-  else servers.imap.appendMessage('INBOX', [], new Date(), taskMail.toString())
-  await waitFor(() => servers.received.length === 1, () => `result mail; ${hostProcess.output}`)
-  const mime = await simpleParser(servers.received[0]!)
+  deliver('profile-task', taskMail)
+  await waitFor(() => smtp.received.length === 1, () => `result mail; ${hostProcess.output}`)
+  const mime = await simpleParser(smtp.received[0]!)
   assert.equal(typeof mime.html, 'string')
   assert.match(String(mime.html), /任务执行报告/)
   assert.match(String(mime.html), /mail-fixture/)
@@ -168,7 +170,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     assert.match(String(mime.html), /<pre style=/)
     assert.match(String(mime.html), /href="https:\/\/example.com\/report"/)
   }
-  const response = await parseMail(servers.received[0]!, config.runtime)
+  const response = await parseMail(smtp.received[0]!, config.runtime)
   const readResult = async (path: string): Promise<string> => {
     try { return await readFile(path, 'utf8') }
     catch (error) { throw new Error(`Missing fixture output ${path}\nReply: ${response.body}\nDSH: ${hostProcess.output}`, { cause: error }) }
@@ -213,9 +215,9 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     await writeFile(join(profile, 'cordis.patch.yml'), dump([...patches.slice(0, -1), { id: 'mail-automation', config: { ...config, enabled: true } }], { noRefs: true }))
     await waitFor(async () => { const current = await status(); return current.phase === 'running' && Object.values(current.health).includes('healthy') }, () => `mail resumed; ${hostProcess.output}`)
     assert.equal((await status()).tasks?.length, 1)
-    servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] second task', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file.`).toString().replace('<fixture@example.com>', '<second@example.com>'))
-    await waitFor(() => servers.received.length === 2, () => `new mail executes after reconfiguration; ${hostProcess.output}`)
-    assert.equal((await parseMail(servers.received[1]!, config.runtime)).body.includes('Status: succeeded'), true)
+    deliver('second', message('[DSH] second task', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file.`).toString().replace('<fixture@example.com>', '<second@example.com>'))
+    await waitFor(() => smtp.received.length === 2, () => `new mail executes after reconfiguration; ${hostProcess.output}`)
+    assert.equal((await parseMail(smtp.received[1]!, config.runtime)).body.includes('Status: succeeded'), true)
   }
 }
 

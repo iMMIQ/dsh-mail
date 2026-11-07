@@ -131,7 +131,7 @@ export class DshExecutor implements TaskExecutor {
       if (ending === 'error') return { state: 'failed', summary: 'Agent execution failed. Inspect the DSH session for details.', reason: 'agent-execution-error', lastOutput, report }
       if (ending !== 'completed') return { state: 'needs_attention', summary: 'The Agent stopped before normal completion. Inspect the DSH session.', reason: `turn-${ending ?? 'missing'}`, lastOutput, report }
       if (candidate) return { state: candidate.status, summary: candidate.summary, reason: '', lastOutput, report }
-      if (finalText) return { state: 'succeeded', summary: 'Agent completed normally.', reason: '', lastOutput, report }
+      if (finalText) return { state: 'succeeded', summary: '', reason: '', lastOutput, report }
       return { state: 'needs_attention', summary: 'No final text response or structured result was recorded. Inspect the DSH session.', reason: 'missing-completed-result', lastOutput, report }
     } finally {
       signal.removeEventListener('abort', abort)

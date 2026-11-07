@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
+import { z } from 'zod'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { MailSettings } from '../src/settings.ts'
 import { settingsSchema } from '../src/settings.ts'
@@ -148,7 +149,7 @@ test('a late connection result is discarded after editing the checked account', 
     await checking
     assert.equal(page.store.getSnapshot().check, undefined)
     assert.equal(page.store.getSnapshot().toast, undefined)
-    assert.equal(page.store.getSnapshot().checking, false)
+    assert.equal(page.store.getSnapshot().operation, 'idle')
   } finally { await page.dispose() }
 })
 
@@ -209,14 +210,14 @@ test('save and enable writes credentials while paused and starts only after logi
     api.checkConnection = async () => {
       assert.equal(scope.state.value!.enabled, false)
       assert.equal(writes.length, 1)
-      assert.equal(page.store.getSnapshot().connecting, true)
+      assert.equal(page.store.getSnapshot().operation, 'enable-check')
       return { ok: true, value: { imap: 'ok', smtp: 'ok' } }
     }
     await page.start()
     assert.equal(scope.state.value!.enabled, true)
     assert.equal(scope.writes.length, 2)
     assert.equal(JSON.stringify(scope.writes).includes('SYNTHETIC_TEST_CODE'), false)
-    assert.equal(page.store.getSnapshot().connecting, false)
+    assert.equal(page.store.getSnapshot().operation, 'idle')
     assert.equal(page.store.getSnapshot().toast?.message, 'started')
   } finally { await page.dispose() }
 })
@@ -432,9 +433,224 @@ test('shared validation rejects unknown template fields and retains incomplete n
     const port = page.store.getSnapshot().draft!.accounts[0]!.receive!.port
     page.editAccount('receive.port', '12x')
     assert.equal(page.store.getSnapshot().fields['account.work.receive.port'], '12x')
+    await page.refresh()
+    assert.equal(page.store.getSnapshot().fields['account.work.receive.port'], '12x')
     assert.equal(page.store.getSnapshot().draft!.accounts[0]!.receive!.port, port)
     assert.equal(page.store.getSnapshot().invalid, true)
     page.editAccount('receive.port', String(port))
     assert.equal(page.store.getSnapshot().invalid, false)
   } finally { await page.dispose() }
+})
+
+
+test('scalar edits have one draft value while numeric and list inputs retain their raw text', async () => {
+  const { page } = fixture()
+  try {
+    page.editAccount('receive.host', 'old.company.local')
+    page.editAccount('receive.user', 'mail-user')
+    page.editRule('replyTo', 'audit@example.com')
+    page.editRule('subjectPrefix', '[TASK]')
+    page.editRule('attachments', 'true')
+    page.editRule('template', '{{body}}')
+    assert.deepEqual(page.store.getSnapshot().fields, {})
+    page.editSetup('server', 'new.company.local')
+    assert.equal(page.store.getSnapshot().draft!.accounts[0]!.receive!.host, 'new.company.local')
+    assert.deepEqual(page.store.getSnapshot().fields, {})
+    page.editAccount('receive.folders', 'INBOX, Tasks, ')
+    page.editAccount('receive.port', '12x')
+    assert.deepEqual(page.store.getSnapshot().fields, { 'account.work.receive.folders': 'INBOX, Tasks, ', 'account.work.receive.port': '12x' })
+    assert.equal(page.store.getSnapshot().invalid, true)
+  } finally { await page.dispose() }
+})
+
+test('activation keeps mail paused until login settles and rejects an overlapping save', async () => {
+  const { page, scope, api } = await setup()
+  const entered = Promise.withResolvers<void>()
+  const reply = Promise.withResolvers<Awaited<ReturnType<MailPageApi['checkConnection']>>>()
+  try {
+    api.checkConnection = () => { entered.resolve(); return reply.promise }
+    const enabling = page.start()
+    await entered.promise
+    assert.equal(scope.state.value!.enabled, false)
+    assert.equal(page.store.getSnapshot().operation, 'enable-check')
+    const writes = scope.writes.length
+    await page.save()
+    assert.equal(scope.writes.length, writes)
+    assert.equal(scope.state.value!.enabled, false)
+    reply.resolve({ ok: true, value: { imap: 'ok', smtp: 'ok' } })
+    await enabling
+    assert.equal(scope.state.value!.enabled, true)
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+  } finally { reply.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } }); await page.dispose() }
+})
+
+test('disposal waits for an admitted credential write and prevents automatic resume', async () => {
+  const { page, scope, api } = await setup()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let disposed = false
+  try {
+    api.set = async () => { entered.resolve(); await release.promise; return { ok: true, value: undefined } }
+    const enabling = page.start()
+    await entered.promise
+    const draining = page.dispose().then(() => { disposed = true })
+    await Promise.resolve()
+    assert.equal(disposed, false)
+    assert.equal(scope.state.value!.enabled, false)
+    release.resolve()
+    await Promise.all([enabling, draining])
+    assert.equal(disposed, true)
+    assert.equal(scope.state.value!.enabled, false)
+    assert.deepEqual(page.store.getSnapshot().credentials, {})
+    assert.equal(page.store.getSnapshot().draft, undefined)
+  } finally { release.resolve(); await page.dispose() }
+})
+
+test('disposal also drains credential reads invoked directly by framework events', async () => {
+  const { page, api } = fixture()
+  page.editAccount('receive.port', 'invalid')
+  const reply = Promise.withResolvers<Awaited<ReturnType<MailPageApi['describe']>>>()
+  let disposed = false
+  try {
+    api.describe = () => reply.promise
+    const reading = page.refreshCredentials()
+    const draining = page.dispose().then(() => { disposed = true })
+    await Promise.resolve()
+    assert.equal(disposed, false)
+    reply.resolve({ ok: true, value: { MAIL_PASSWORD: { configured: true, writable: true } } })
+    await Promise.all([reading, draining])
+    assert.equal(disposed, true)
+    assert.deepEqual(page.store.getSnapshot().credentials, {})
+    assert.deepEqual(page.store.getSnapshot().fields, {})
+    assert.equal(page.store.getSnapshot().invalid, false)
+  } finally { reply.resolve({ ok: true, value: {} }); await page.dispose() }
+})
+
+
+test('repeated saves share one active write instead of submitting the draft twice', async () => {
+  const { page, scope } = fixture()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const mutate = scope.mutate.bind(scope)
+  let attempts = 0
+  try {
+    page.editRule('subjectContains', 'review')
+    scope.mutate = async (...args) => { attempts++; entered.resolve(); await release.promise; return mutate(...args) }
+    const saving = page.save()
+    await entered.promise
+    await page.save()
+    assert.equal(attempts, 1)
+    assert.equal(page.store.getSnapshot().operation, 'save')
+    release.resolve()
+    await saving
+    assert.equal(scope.writes.length, 1)
+    assert.equal(scope.state.value!.rules[0]!.match.subjectContains, 'review')
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+  } finally { release.resolve(); await page.dispose() }
+})
+
+
+test('an accepted external configuration invalidates an in-flight connection result', async () => {
+  const { page, scope, api } = fixture()
+  const reply = Promise.withResolvers<Awaited<ReturnType<MailPageApi['checkConnection']>>>()
+  try {
+    api.checkConnection = () => reply.promise
+    const checking = page.checkConnection()
+    const accounts = structuredClone(scope.state.value!.accounts)
+    accounts[0]!.receive!.host = 'changed.company.local'
+    await scope.mutate([{ op: 'set', path: ['accounts'], value: z.json().parse(accounts) }], scope.state.revision)
+    reply.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    await checking
+    assert.equal(page.store.getSnapshot().draft!.accounts[0]!.receive!.host, 'changed.company.local')
+    assert.equal(page.store.getSnapshot().check, undefined)
+    assert.equal(page.store.getSnapshot().toast, undefined)
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+  } finally { reply.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } }); await page.dispose() }
+})
+
+
+test('editing during a standalone check permits saving immediately and the old answer cannot unlock it', async () => {
+  const { page, scope, api } = fixture()
+  const answer = Promise.withResolvers<Awaited<ReturnType<MailPageApi['checkConnection']>>>()
+  const writing = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const mutate = scope.mutate.bind(scope)
+  try {
+    api.checkConnection = () => answer.promise
+    const checking = page.checkConnection()
+    page.editAccount('receive.host', 'new.company.local')
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+    scope.mutate = async (...args) => { writing.resolve(); await release.promise; return mutate(...args) }
+    const saving = page.save()
+    await writing.promise
+    answer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    await checking
+    assert.equal(page.store.getSnapshot().operation, 'save')
+    assert.equal(page.store.getSnapshot().check, undefined)
+    assert.equal(page.store.getSnapshot().toast, undefined)
+    release.resolve()
+    await saving
+    assert.equal(scope.state.value!.accounts[0]!.receive!.host, 'new.company.local')
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+  } finally { answer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } }); release.resolve(); await page.dispose() }
+})
+
+test('editing during a standalone check permits activation before the old answer settles', async () => {
+  const { page, scope, api } = fixture()
+  const oldAnswer = Promise.withResolvers<Awaited<ReturnType<MailPageApi['checkConnection']>>>()
+  const newAnswer = Promise.withResolvers<Awaited<ReturnType<MailPageApi['checkConnection']>>>()
+  const entered = Promise.withResolvers<void>()
+  let calls = 0
+  try {
+    await page.refreshCredentials()
+    api.checkConnection = () => { if (++calls === 1) return oldAnswer.promise; entered.resolve(); return newAnswer.promise }
+    const checking = page.checkConnection()
+    page.editAccount('receive.host', 'new.company.local')
+    const enabling = page.start()
+    await entered.promise
+    assert.equal(scope.state.value!.enabled, false)
+    oldAnswer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    await checking
+    assert.equal(page.store.getSnapshot().operation, 'enable-check')
+    assert.equal(page.store.getSnapshot().check, undefined)
+    assert.equal(page.store.getSnapshot().toast, undefined)
+    newAnswer.resolve({ ok: true, value: { imap: 'ok', smtp: 'ok' } })
+    await enabling
+    assert.equal(scope.state.value!.enabled, true)
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+  } finally {
+    oldAnswer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    newAnswer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    await page.dispose()
+  }
+})
+
+test('switching accounts releases a standalone check without letting its old answer clear a newer check', async () => {
+  const value = settingsSchema.parse({ ...configuration('/tmp/mail-ui-check-switch'), enabled: true })
+  value.accounts.push({ ...structuredClone(value.accounts[0]!), id: 'second', address: 'second@example.com' })
+  const { page, api } = fixture(value)
+  const oldAnswer = Promise.withResolvers<Awaited<ReturnType<MailPageApi['checkConnection']>>>()
+  const newAnswer = Promise.withResolvers<Awaited<ReturnType<MailPageApi['checkConnection']>>>()
+  const accounts: string[] = []
+  try {
+    api.checkConnection = id => { accounts.push(id); return id === 'work' ? oldAnswer.promise : newAnswer.promise }
+    const first = page.checkConnection()
+    page.selectAccount('second')
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+    const second = page.checkConnection()
+    assert.deepEqual(accounts, ['work', 'second'])
+    oldAnswer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    await first
+    assert.equal(page.store.getSnapshot().operation, 'check')
+    assert.equal(page.store.getSnapshot().check, undefined)
+    newAnswer.resolve({ ok: true, value: { imap: 'ok', smtp: 'ok' } })
+    await second
+    assert.equal(page.store.getSnapshot().checkAccountId, 'second')
+    assert.equal(page.store.getSnapshot().check?.imap, 'ok')
+    assert.equal(page.store.getSnapshot().operation, 'idle')
+  } finally {
+    oldAnswer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    newAnswer.resolve({ ok: true, value: { imap: 'failed', smtp: 'failed' } })
+    await page.dispose()
+  }
 })

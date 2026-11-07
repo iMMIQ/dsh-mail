@@ -8,7 +8,7 @@ import { verifySender } from '../src/auth.ts'
 import { parseMail } from '../src/mail.ts'
 import { outboundMessage } from '../src/outbound.ts'
 import { fixture, message } from './helpers.ts'
-import { mailServers, waitFor } from './network.ts'
+import { imapServer, mailServers, smtpServer, waitFor } from './network.ts'
 
 test('real TLS IMAP reception executes and submits a threaded SMTP result', async () => {
   await using t = new AsyncDisposableStack()
@@ -21,7 +21,8 @@ test('real TLS IMAP reception executes and submits a threaded SMTP result', asyn
   const runtime = new MailRuntime(f.config, f.spool, { ...f.deps, verify: (raw, mail, policy, signal) => verifySender(raw, mail, policy, signal, 1_000), send: smtpSender(f.config, secret) })
   await runtime.initialize()
   const receiver = new ImapReceiver(account, f.config, runtime, secret)
-  f.cleanup.push(() => runtime.close(), () => receiver.close())
+  f.cleanup.defer(() => runtime.close())
+  f.cleanup.defer(() => receiver.close())
   servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] historical').toString())
   receiver.start()
   await waitFor(() => [...runtime.health.values()].includes('healthy'), () => JSON.stringify(runtime.status()))
@@ -46,7 +47,7 @@ test('real TLS IMAP reception executes and submits a threaded SMTP result', asyn
 for (const behavior of ['reject', 'drop'] as const) {
   test(`real SMTP ${behavior} preserves rejection versus unknown submission`, async () => {
     await using t = new AsyncDisposableStack()
-    const servers = await mailServers(t, behavior)
+    const servers = await smtpServer(t, behavior)
     const f = await fixture(t)
     await f.runtime.admit(f.delivery()); await f.finish()
     Object.assign(f.config.accounts[0]!.send!, { host: '127.0.0.1', port: servers.smtpPort, ca: servers.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
@@ -60,12 +61,12 @@ for (const behavior of ['reject', 'drop'] as const) {
 
 test('an untrusted TLS certificate fails before IMAP can admit messages', async () => {
   await using t = new AsyncDisposableStack()
-  const servers = await mailServers(t)
+  const servers = await imapServer(t)
   const f = await fixture(t)
   const account = f.config.accounts[0]!
   Object.assign(account.receive!, { host: '127.0.0.1', port: servers.imapPort, rescanIntervalMs: 30 })
   const receiver = new ImapReceiver(account, f.config, f.runtime, async () => 'testpass')
-  f.cleanup.push(() => receiver.close())
+  f.cleanup.defer(() => receiver.close())
   receiver.start()
   await waitFor(() => [...f.runtime.health.values()].includes('imap-connection-failed'), () => 'TLS certificate rejection')
   assert.equal(f.store.inbox().length, 0)

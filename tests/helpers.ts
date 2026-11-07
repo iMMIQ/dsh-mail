@@ -39,21 +39,22 @@ export function configuration(directory: string): Config {
 
 /** Owned resource stack closes sockets/workers before storage and directories. */
 export async function fixture(t: AsyncDisposableStack, override: Partial<RuntimeDependencies> = {}) {
+  const cleanup = t.use(new AsyncDisposableStack())
+  const directories = cleanup.use(new AsyncDisposableStack())
   const directory = await mkdtemp(join(tmpdir(), 'dsh-mail-'))
-  const cleanup: (() => Promise<unknown>)[] = [() => rm(directory, { recursive: true, force: true })]
-  t.defer(async () => { for (const close of cleanup.reverse()) await close() })
+  directories.defer(() => rm(directory, { recursive: true, force: true }))
   const ctx = new Context()
-  cleanup.push(() => ctx.fiber.dispose())
+  cleanup.defer(() => ctx.fiber.dispose())
   await ctx.plugin(Storage)
   const backend = new SqliteStorageBackend({ path: join(directory, 'state.sqlite'), journalMode: 'wal' })
   ctx.storage.backend.register('sqlite', backend)
-  cleanup.push(() => backend.close())
+  cleanup.defer(() => backend.close())
   const facility = new DomainFacility(ctx, { backend: 'sqlite' })
   const store = await DomainMailStore.open(facility)
-  cleanup.push(() => store.close())
+  cleanup.defer(() => store.close())
   const spool = new Spool(join(directory, 'spool'))
   await spool.open(60_000)
-  cleanup.push(() => spool.close())
+  cleanup.defer(() => spool.close())
   const config = configuration(directory)
   let now = Date.now()
   const executed: TaskRecord[] = []
@@ -64,9 +65,9 @@ export async function fixture(t: AsyncDisposableStack, override: Partial<Runtime
   } }, async verify() {}, async send(task) { sent.push(task); return { state: 'accepted' } },
   report: code => reports.push(code), now: () => now, ...override }
   const runtime = new MailRuntime(config, spool, deps)
-  cleanup.push(() => runtime.close())
+  cleanup.defer(() => runtime.close())
   await runtime.initialize()
   const delivery = (uid = 1, raw = message()): Delivery => ({ account: 'work', folder: 'INBOX', uidValidity: '1', uid, receivedAt: now, raw: Buffer.from(raw.toString().replace('Message-ID: <fixture@example.com>', `Message-ID: <fixture-${uid}@example.com>`)) })
   const finish = async (): Promise<void> => { await runtime.tick(); await runtime.whenSettled(); now += 10; await runtime.tick() }
-  return { directory, config, store, facility, spool, runtime, deps, executed, sent, reports, cleanup, delivery, finish, advance: () => { now += 10_000 } }
+  return { directory, config, store, facility, spool, runtime, deps, executed, sent, reports, cleanup, directories, delivery, finish, advance: () => { now += 10_000 } }
 }

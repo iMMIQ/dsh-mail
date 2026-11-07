@@ -4,7 +4,7 @@ import { Button, SettingsForm, SettingsValueField, SettingsSecretField, Switch, 
 import { useEffect, useState } from 'react'
 import { validIntegerText } from '../config-schema.ts'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { MailPageFace } from './controller.ts'
+import { mailOperationState, type MailPageFace } from './controller.ts'
 import type { MailLocaleKey } from './locales.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -28,7 +28,8 @@ export function MailPage(props: PageProps) {
     catch (_error) { setCopy({ body, ok: false }) }
   }
   if (props.view === 'summary') return t('description')
-  const disabled = !state.writable || state.saving || state.connecting
+  const activity = mailOperationState(state.operation)
+  const disabled = !state.writable || activity.busy
   const primaryConnection = account?.receive ?? account?.send
   const password = primaryConnection ? state.credentials[primaryConnection.auth.credentialRef] : undefined
   const incomplete = state.incomplete.map(key => t(key))
@@ -55,12 +56,12 @@ export function MailPage(props: PageProps) {
   }
   const checkedAccount = draft?.accounts.find(value => value.id === state.checkAccountId)
   return <div className="dsh-mail"><SettingsForm
-    state={{ ...state, saving: state.saving || state.connecting, invalid: !ready || !state.writable, dirty: state.dirty || !running }}
-    labels={{ unavailable: t('unavailable'), readOnly: t('readOnly'), saveFailed: t('saveFailed'), save: t(pausing ? 'savePause' : running ? 'save' : 'saveStart'), saving: t(state.connecting ? 'connecting' : 'saving') }}
+    state={{ ...state, saving: activity.busy, invalid: !ready || !state.writable, dirty: state.dirty || !running }}
+    labels={{ unavailable: t('unavailable'), readOnly: t('readOnly'), saveFailed: t('saveFailed'), save: t(pausing ? 'savePause' : running ? 'save' : 'saveStart'), saving: t(activity.connecting ? 'connecting' : 'saving') }}
     onSave={pausing ? props.save : props.start} onDiscard={props.discard}>
     <div className="mail-stack">
       <div className="mail-summary" role="status"><div className="mail-row"><Tag tone={running ? 'success' : 'neutral'}>{t(state.status?.phase ?? 'paused')}</Tag>
-        <Button size="sm" disabled={state.connecting} onClick={props.refresh}>{t('refresh')}</Button></div>
+        <Button size="sm" disabled={activity.connecting} onClick={props.refresh}>{t('refresh')}</Button></div>
         {running && <p className="mail-hint">{t('runningHint')}</p>}
         {Object.values(state.status?.health ?? {}).some(value => value !== 'healthy') && <p className="mail-hint">{t('healthFailed')}</p>}
       </div>
@@ -99,7 +100,7 @@ export function MailPage(props: PageProps) {
             {password?.configured && primaryConnection && <div><Button size="sm" disabled={disabled || !password.writable} onClick={() => props.removeCredential(primaryConnection.auth.credentialRef)}>{t(password.remove ? 'undoRemoveCode' : 'removeCode')}</Button></div>}
             {account.receive?.protocol === 'imap' && accountField('receive.folders', 'folders', account.receive.folders.join(', '))}
             {account.receive?.protocol === 'pop3' && <p className="mail-hint">{t('pop3Hint')}</p>}
-            <div><Button variant="outline" size="sm" disabled={state.dirty || state.checking || disabled} onClick={props.checkConnection}>{t(state.checking ? 'checking' : 'check')}</Button></div>
+            <div><Button variant="outline" size="sm" disabled={state.dirty || activity.checking || disabled} onClick={props.checkConnection}>{t(activity.checking ? 'checking' : 'check')}</Button></div>
           </> : <p className="mail-hint">{t('passwordFirst')}</p>}
         </div></details>
         {state.check && <div className="mail-connection-result" role="status">

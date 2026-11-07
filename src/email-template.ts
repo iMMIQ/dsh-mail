@@ -2,9 +2,9 @@
 /** Standalone HTML email: inline layout, escaped metadata and sanitized Markdown output. */
 import MarkdownIt from 'markdown-it'
 import sanitizeHtml from 'sanitize-html'
-import type { TaskRecord } from './types.ts'
+import type { ResultReport } from './report.ts'
 
-const states: Record<TaskRecord['state'], { label: string; color: string; background: string }> = {
+const states: Record<ResultReport['state'], { label: string; color: string; background: string }> = {
   succeeded: { label: '已完成', color: '#187249', background: '#e9f6ee' },
   failed: { label: '执行失败', color: '#b63736', background: '#fff0ee' },
   cancelled: { label: '已取消', color: '#586477', background: '#edf0f5' },
@@ -64,30 +64,28 @@ function markdown(text: string, renderer: InstanceType<typeof MarkdownIt>, inlin
 
 /**
  * Render a complete result email. If the byte budget cannot fit its metadata, use plain text only.
- * @param task Settled execution and its observed report fields.
+ * @param report Resolved execution facts shared with the plain-text alternative.
  * @param maxBytes Maximum UTF-8 bytes for the HTML alternative, including layout and truncation copy.
  * @returns Safe, balanced HTML within the budget, or undefined when the layout cannot fit.
  */
-export function replyHtml(task: TaskRecord, maxBytes: number): string | undefined {
-  const status = states[task.state]
-  const report = task.report
-  const title = task.title.replace(/^\[Mail\]\s*/, '').replace(/^\[DSH\]\s*/i, '') || 'DSH 任务'
+export function replyHtml(report: ResultReport, maxBytes: number): string | undefined {
+  const status = states[report.state]
+  const title = report.title
   const renderer = new MarkdownIt({ html: false, breaks: true, linkify: false, typographer: false })
   renderer.renderer.rules.image = (tokens, index) => escape(tokens[index]?.content ?? '')
-  const elapsed = report?.startedAt !== undefined && report.finishedAt !== undefined && report.finishedAt >= report.startedAt
-    ? duration(report.finishedAt - report.startedAt) : undefined
+  const elapsed = report.elapsedMs !== undefined ? duration(report.elapsedMs) : undefined
   const fields = [
-    row('工作目录', task.workspacePath ?? task.rule.task.workspacePath ?? '未记录'),
-    ...(report?.model ? [row('执行模型', [report.provider, report.model].filter(Boolean).join(' / '))] : []),
-    ...(report?.steps !== undefined ? [row('执行步数', String(report.steps))] : []),
-    ...(report?.startedAt !== undefined ? [row('开始时间', date(report.startedAt))] : []),
-    ...(report?.finishedAt !== undefined ? [row('结束时间', date(report.finishedAt))] : []),
-    row('会话编号', task.sessionId), row('任务编号', task.id),
-    ...(report?.turn !== undefined || task.turn !== undefined ? [row('会话轮次', String(report?.turn ?? task.turn))] : []),
-    ...(task.reason ? [row('诊断信息', task.reason)] : []),
+    row('工作目录', report.workspacePath ?? '未记录'),
+    ...(report.model ? [row('执行模型', report.model)] : []),
+    ...(report.steps !== undefined ? [row('执行步数', String(report.steps))] : []),
+    ...(report.startedAt !== undefined ? [row('开始时间', date(report.startedAt))] : []),
+    ...(report.finishedAt !== undefined ? [row('结束时间', date(report.finishedAt))] : []),
+    row('会话编号', report.sessionId), row('任务编号', report.taskId),
+    ...(report.turn !== undefined ? [row('会话轮次', String(report.turn))] : []),
+    ...(report.reason ? [row('诊断信息', report.reason)] : []),
   ].join('')
-  const summary = ['Agent completed normally.', 'DSH turn completed.'].includes(task.summary) ? '本轮任务已完成，以下是 Agent 的最后回复。' : task.summary || '执行结果见下方回复。'
-  const output = task.lastOutput?.trim() || '本轮没有记录到 Agent 的文字输出，请在 DSH 会话中查看执行情况。'
+  const summary = report.summary || (report.state === 'succeeded' ? '本轮任务已完成，以下是 Agent 的最后回复。' : '执行结果见下方回复。')
+  const output = report.output.trim() || '本轮没有记录到 Agent 的文字输出，请在 DSH 会话中查看执行情况。'
   const build = (body: string, shortened: boolean): string => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>${escape(title)}</title></head>
 <body style="margin:0;padding:0;background:#f2f5fa;color:#233047;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',Arial,sans-serif;">
 <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">${escape(`${status.label} · ${title}`)}</div>

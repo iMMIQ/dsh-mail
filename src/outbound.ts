@@ -3,6 +3,7 @@
 import type { Config } from './config.ts'
 import { replyHtml } from './email-template.ts'
 import { replyText } from './reply.ts'
+import { prepareReport } from './report.ts'
 import type { OutboundMessage, TaskId, TaskRecord } from './types.ts'
 
 type Outbox = TaskRecord['outbox']
@@ -22,8 +23,9 @@ export function createOutbox(input: { id: TaskId; address: string; subject: stri
  * @returns Frozen-content fields, omitting HTML when the template does not fit.
  */
 export function renderResult(task: TaskRecord, maxBytes: number): Pick<Outbox, 'text' | 'html'> {
-  const html = replyHtml(task, maxBytes)
-  return { text: replyText(task, maxBytes), ...(html ? { html } : {}) }
+  const report = prepareReport(task)
+  const html = replyHtml(report, maxBytes)
+  return { text: replyText(report, maxBytes), ...(html ? { html } : {}) }
 }
 
 /** Select a task's result or receipt without changing the task supplied to other consumers.

@@ -8,7 +8,7 @@ import { parseMail, matches, systemReason, taskPrompt, replyInput } from './mail
 import { Spool } from './store.ts'
 import { canonicalWorkspace, emailWorkspace, taskWorkspace } from './workspace.ts'
 import { createOutbox, outboundMessage, renderResult } from './outbound.ts'
-import { MailError, type Delivery, type InboxRecord, type Mail, type MailId, type RuntimeDependencies, type RunReport, type TaskId, type TaskRecord } from './types.ts'
+import { MailError, type Delivery, type ExecutionResult, type InboxRecord, type Mail, type MailId, type RuntimeDependencies, type RunReport, type TaskId, type TaskRecord, type TerminalState } from './types.ts'
 
 /** Shared decision produced by preview and actual ingestion without persistence. */
 type Decision = { state: 'ignored' | 'quarantined' | 'held' | 'verification_pending'; reason: string }
@@ -207,27 +207,26 @@ export class MailRuntime {
       await this.settle(task, 'needs_attention', 'The selected workspace is unavailable or changed. Review the task before execution.', error instanceof MailError ? error.code : 'workspace-unavailable')
       return
     }
-    await this.updateTask(task.id, current => ({ ...current, state: 'starting' }))
-    if (this.closing) { await this.settle(task, 'needs_attention', 'Stopped before execution.', 'runtime-stopped'); return }
     await this.updateTask(task.id, current => ({ ...current, state: 'running', report: { startedAt: this.now() } }))
+    if (this.closing) { await this.settle(task, 'needs_attention', 'Stopped before execution.', 'runtime-stopped'); return }
     const timer = setTimeout(() => controller.abort(new MailError('task-timeout')), task.rule.task.timeoutMs)
+    let result: ExecutionResult
     try {
-      const result = await this.deps.executor.execute(task, controller.signal)
-      const timeout = controller.signal.reason instanceof MailError && controller.signal.reason.code === 'task-timeout'
-      const state = timeout ? 'timed_out' : controller.signal.aborted ? 'cancelled' : result.state
-      await this.settle(task, state, result.summary, timeout ? 'task-timeout' : result.reason, result.lastOutput ?? '', result.report)
+      result = await this.deps.executor.execute(task, controller.signal)
     } catch (error) {
       if (error instanceof MailError && error.code === 'session-busy' && !controller.signal.aborted && !this.closing) {
         await this.updateTask(task.id, current => ({ ...current, state: 'queued', reason: 'waiting-for-session' }))
         return
       }
-      const state = controller.signal.reason instanceof MailError && controller.signal.reason.code === 'task-timeout' ? 'timed_out'
-        : controller.signal.aborted ? 'cancelled' : 'needs_attention'
-      await this.settle(task, state, 'Execution did not complete. Inspect the DSH session before retrying.', error instanceof MailError ? error.code : 'execution-unknown')
+      result = { state: 'needs_attention', summary: 'Execution did not complete. Inspect the DSH session before retrying.',
+        reason: error instanceof MailError ? error.code : 'execution-unknown' }
     } finally { clearTimeout(timer) }
+    const timeout = controller.signal.reason instanceof MailError && controller.signal.reason.code === 'task-timeout'
+    const state = timeout ? 'timed_out' : controller.signal.aborted ? 'cancelled' : result.state
+    await this.settle(task, state, result.summary, timeout ? 'task-timeout' : result.reason, result.lastOutput ?? '', result.report)
   }
 
-  private async settle(task: TaskRecord, state: TaskRecord['state'], summary: string, reason: string, lastOutput = task.lastOutput ?? '', report?: RunReport): Promise<void> {
+  private async settle(task: TaskRecord, state: TerminalState, summary: string, reason: string, lastOutput = task.lastOutput ?? '', report?: RunReport): Promise<void> {
     const notify = task.rule.reply.on.some(value => value === state)
     await this.updateTask(task.id, current => {
       const { finishedAt: _previousFinish, ...observed } = { ...current.report, ...report }
@@ -279,7 +278,7 @@ export class MailRuntime {
   }
 
   /** Persist one externally created Session turn as a notification, never as executable work. */
-  notifySession(input: { sessionId: SessionId; turn: number; title: string; workspacePath?: string; state: TaskRecord['state']; lastOutput: string; reason: string; report?: RunReport }): Promise<void> {
+  notifySession(input: { sessionId: SessionId; turn: number; title: string; workspacePath?: string; state: TerminalState; lastOutput: string; reason: string; report?: RunReport }): Promise<void> {
     return this.manage(async () => {
       if (!this.config.notifications.enabled) return
       const previous = this.deps.store.tasks().filter(task => task.sessionId === input.sessionId).at(-1)
@@ -291,7 +290,7 @@ export class MailRuntime {
       if (this.deps.store.taskCount >= this.config.runtime.maxRecords) throw new MailError('record-capacity-reached')
       const task: TaskRecord = { id, mailId: brandString<MailId>(identity('session-notification', input.sessionId, input.turn)), account: rule.account, rule: structuredClone(rule),
         createdAt: this.now(), prompt: '', title: input.title, sessionId: input.sessionId, messageId: `mail-input-${id}`, ...(input.workspacePath ? { workspacePath: input.workspacePath } : {}),
-        originalMessageId: previous?.outbox.messageId ?? null, references: previous ? [...previous.references, ...(previous.originalMessageId ? [previous.originalMessageId] : [])].slice(-20) : [], state: input.state, summary: input.state === 'succeeded' ? 'DSH turn completed.' : 'Inspect this DSH session before continuing.',
+        originalMessageId: previous?.outbox.messageId ?? null, references: previous ? [...previous.references, ...(previous.originalMessageId ? [previous.originalMessageId] : [])].slice(-20) : [], state: input.state, summary: input.state === 'succeeded' ? '' : 'Inspect this DSH session before continuing.',
         reason: input.reason, attempt: 1, lastOutput: input.lastOutput, ...(input.report ? { report: input.report } : {}), origin: 'session', turn: input.turn,
         authorization: { sender: previous?.authorization.sender ?? rule.reply.to.toLowerCase(), policy: structuredClone(this.config.senderPolicies[rule.authorization.policy]!) }, operations: [],
         outbox: createOutbox({ id, address: this.config.accounts.find(account => account.id === rule.reply.account)!.address,

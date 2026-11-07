@@ -9,7 +9,7 @@ import { MailRuntime } from '../src/runtime.ts'
 import { smtpSender } from '../src/transports.ts'
 import { parseMail } from '../src/mail.ts'
 import { configuration, fixture, message } from './helpers.ts'
-import { mailServers, waitFor } from './network.ts'
+import { smtpServer, waitFor } from './network.ts'
 import { pop3Server } from './pop3-network.ts'
 
 function reception(server: Awaited<ReturnType<typeof pop3Server>>) {
@@ -21,17 +21,17 @@ for (const mode of ['direct', 'starttls'] as const) {
   test(`POP3 ${mode} receives a task and submits its threaded SMTP result without deleting mail`, async () => {
     await using resources = new AsyncDisposableStack()
     const server = await pop3Server(resources, mode)
-    const smtp = await mailServers(resources)
+    const smtp = await smtpServer(resources)
     const f = await fixture(resources)
     const account = f.config.accounts[0]!
     account.receive = reception(server)
     Object.assign(account.send!, { host: '127.0.0.1', port: smtp.smtpPort, ca: smtp.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
     const runtime = new MailRuntime(f.config, f.spool, { ...f.deps, send: smtpSender(f.config, async () => 'testpass') })
     await runtime.initialize()
-    f.cleanup.push(() => runtime.close())
+    f.cleanup.defer(() => runtime.close())
     server.messages.push({ uid: 'history', raw: message('[DSH] history') })
     const receiver = new Pop3Receiver(account, f.config, runtime, async () => 'testpass')
-    f.cleanup.push(() => receiver.close())
+    f.cleanup.defer(() => receiver.close())
     receiver.start()
     await waitFor(() => runtime.health.get('work:POP3') === 'healthy', () => 'POP3 baseline')
     assert.equal(f.store.inbox().length, 0)
@@ -60,7 +60,7 @@ test('POP3 UIDLs survive receiver restart, deletions and message renumbering', a
   server.messages.push({ uid: 'first', raw: message() }, { uid: 'second', raw: f.delivery(2).raw })
   const start = (): Pop3Receiver => {
     const receiver = new Pop3Receiver(account, f.config, f.runtime, async () => 'testpass')
-    f.cleanup.push(() => receiver.close()); receiver.start(); return receiver
+    f.cleanup.defer(() => receiver.close()); receiver.start(); return receiver
   }
   const first = start()
   await waitFor(() => f.store.inbox().length === 2 && f.runtime.health.get('work:POP3') === 'healthy', () => 'both POP3 messages admitted')
@@ -207,7 +207,7 @@ test('closing a POP3 receiver aborts an active scan and drains its socket', asyn
   const account = f.config.accounts[0]!
   account.receive = reception(server)
   const receiver = new Pop3Receiver(account, f.config, f.runtime, async () => 'testpass')
-  f.cleanup.push(() => receiver.close())
+  f.cleanup.defer(() => receiver.close())
   receiver.start()
   await waitFor(() => server.commands.some(command => command.name === 'UIDL'), () => 'POP3 scan entered')
   await receiver.close()
@@ -224,7 +224,7 @@ for (const behavior of ['missing', 'duplicate'] as const) {
     const f = await fixture(resources)
     f.config.accounts[0]!.receive = { ...reception(server), initialSync: 'all' }
     const receiver = new Pop3Receiver(f.config.accounts[0]!, f.config, f.runtime, async () => 'testpass')
-    f.cleanup.push(() => receiver.close()); receiver.start()
+    f.cleanup.defer(() => receiver.close()); receiver.start()
     await waitFor(() => f.runtime.health.has('work:POP3'), () => 'POP3 UIDL failure reported')
     assert.notEqual(f.runtime.health.get('work:POP3'), 'healthy')
     assert.equal(f.store.inbox().length, 0)
@@ -240,7 +240,7 @@ for (const advertised of [true, false]) {
     f.config.accounts[0]!.receive = { ...reception(server), initialSync: 'all' }
     server.messages.push({ uid: 'oversize', raw: message('[DSH] large', 'x'.repeat(1024)), ...!advertised ? { advertisedSize: 1 } : {} }, { uid: 'small', raw: f.delivery(2).raw })
     const receiver = new Pop3Receiver(f.config.accounts[0]!, f.config, f.runtime, async () => 'testpass')
-    f.cleanup.push(() => receiver.close()); receiver.start()
+    f.cleanup.defer(() => receiver.close()); receiver.start()
     await waitFor(() => f.store.inbox().length === 2, () => JSON.stringify(f.runtime.status()))
     assert.equal(f.store.inbox()[0]?.reason, 'message-too-large')
     await f.finish()

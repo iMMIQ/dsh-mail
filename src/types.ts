@@ -4,6 +4,9 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { z } from 'zod'
 import { ruleSchema, senderPolicySchema } from './config.ts'
+import { terminalStates, type TerminalState } from './config-schema.ts'
+
+export type { TerminalState } from './config-schema.ts'
 
 /** Plugin-owned durable identities. */
 export type MailId = Branded<'dsh-mail/message'>
@@ -81,7 +84,8 @@ export const taskSchema = z.strictObject({
   prompt: z.string(), title: z.string(), sessionId: z.string(), messageId: z.string(),
   workspacePath: z.string().optional(),
   originalMessageId: z.string().nullable(), references: z.array(z.string()),
-  state: z.enum(['queued', 'starting', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention']),
+  // Version-one records can contain starting; new executions are claimed as running.
+  state: z.enum(['queued', 'starting', 'running', ...terminalStates]),
   summary: z.string(), reason: z.string(), attempt: z.number().int(),
   lastOutput: z.string().optional(),
   report: reportSchema.optional(),
@@ -100,7 +104,8 @@ export type TaskRecord = z.infer<typeof taskSchema>
 
 /** Settled Agent outcome; text excludes reasoning and raw tool results. */
 export interface ExecutionResult {
-  state: TaskRecord['state']
+  state: TerminalState
+  /** Empty when the mail renderer should supply its default summary. */
   summary: string
   reason: string
   lastOutput?: string

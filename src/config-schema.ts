@@ -17,7 +17,10 @@ const connection = {
 
 const receiveDefaults = { initialSync: 'new-only' as const, rescanIntervalMs: 60_000, maxMessageAgeMs: 172_800_000 }
 const taskDefaults = { permissionPreset: 'danger-full-access', timeoutMs: 900_000, maxSteps: 40 }
-const replyStates = ['succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention'] as const
+/** Settled execution outcomes accepted by reply policies and result notifications. */
+export const terminalStates = ['succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention'] as const
+/** One settled execution outcome. */
+export type TerminalState = typeof terminalStates[number]
 
 const reception = {
   initialSync: z.enum(['new-only', 'all']).default(receiveDefaults.initialSync),
@@ -66,12 +69,11 @@ export const ruleSchema = z.strictObject({
   }),
   reply: z.strictObject({
     account: id, to: addressSchema,
-    on: z.array(z.enum(replyStates)).default([...replyStates]),
+    on: z.array(z.enum(terminalStates)).default([...terminalStates]),
   }),
 })
 
-/** Full plugin config. Unknown keys reject instead of silently changing automation. */
-export const configurationSchema = z.strictObject({
+const configurationValues = z.strictObject({
   stateDirectory: z.string().min(1),
   accounts: z.array(accountSchema).min(1),
   senderPolicies: z.record(id, senderPolicySchema),
@@ -94,7 +96,12 @@ export const configurationSchema = z.strictObject({
     retryDelayMs: ms.default(30_000), minSendIntervalMs: ms.default(1_000),
     lockStaleMs: ms.min(5_000).default(60_000),
   }).prefault({}),
-}).superRefine((config, ctx) => {
+})
+
+type RelatedConfiguration = Pick<z.output<typeof configurationValues>, 'accounts' | 'rules' | 'senderPolicies' | 'templates' | 'notifications' | 'runtime'>
+
+/** Validate references and template variables after each schema has parsed its own fields. */
+function validateRelations(config: RelatedConfiguration, ctx: z.RefinementCtx): void {
   if (config.notifications.enabled && !config.rules.length) ctx.addIssue({ code: 'custom', message: 'notification rule missing' })
   if (config.notifications.rule && !config.rules.some(rule => rule.id === config.notifications.rule)) ctx.addIssue({ code: 'custom', message: 'notification rule not found' })
   for (const [name, entries] of [['accounts', config.accounts], ['rules', config.rules]] as const) {
@@ -113,7 +120,10 @@ export const configurationSchema = z.strictObject({
       if (!fields.has(match[1] ?? '')) ctx.addIssue({ code: 'custom', message: `${rule.id}: unknown template variable` })
     }
   }
-})
+}
+
+/** Full plugin config. Unknown keys reject instead of silently changing automation. */
+export const configurationSchema = configurationValues.superRefine(validateRelations)
 
 /** Mailbox connection and sending identity. */
 export type Account = z.output<typeof accountSchema>
@@ -136,9 +146,12 @@ export const settingsValueSchema = z.strictObject({
 }).superRefine((value, ctx) => {
   if (value.enabled && (!value.accounts.length || !value.rules.length)) ctx.addIssue({ code: 'custom', message: 'Configure an account and a rule before enabling mail' })
   if (value.accounts.length || value.rules.length || value.enabled) {
-    const { enabled: _enabled, ...configuration } = value
-    const parsed = configurationSchema.safeParse(configuration)
-    if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ code: 'custom', path: issue.path, message: issue.message })
+    if (value.stateDirectory === undefined) {
+      const required = configurationValues.shape.stateDirectory.safeParse(value.stateDirectory)
+      if (!required.success) for (const issue of required.error.issues) ctx.addIssue({ ...issue, path: ['stateDirectory'] })
+    }
+    if (!value.accounts.length) ctx.addIssue({ code: 'too_small', origin: 'array', minimum: 1, inclusive: true, input: value.accounts, path: ['accounts'] })
+    validateRelations(value, ctx)
   }
 })
 
@@ -187,7 +200,7 @@ export function createAccountDraft(id: string): Account {
  */
 export function createRuleDraft(id: string, account: string, policy: string, replyAccount: string): Rule {
   return { id, account, priority: 0, authorization: { policy, allowedSenders: [] }, match: { subjectPrefix: '[DSH]' }, extract: {},
-    task: { ...taskDefaults, template: id, attachmentTypes: [] }, reply: { account: replyAccount, to: '', on: [...replyStates] } }
+    task: { ...taskDefaults, template: id, attachmentTypes: [] }, reply: { account: replyAccount, to: '', on: [...terminalStates] } }
 }
 
 /** Validate unfinished positive-integer text without replacing the user's draft.

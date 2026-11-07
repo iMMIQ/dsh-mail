@@ -140,19 +140,21 @@ test('temporary SMTP rejection retries only frozen notification content', async 
   assert.equal(content.length, 2); assert.equal(content[0], content[1]); assert.equal(f.executed.length, 1)
 })
 
-test('process restart preserves accepted tasks and quarantines interrupted side effects', async () => {
-  await using t = new AsyncDisposableStack()
-  const f = await fixture(t)
-  await f.runtime.admit(f.delivery()); await f.finish()
-  const task = f.store.tasks()[0]!
-  await f.store.putTask({ ...task, state: 'running', outbox: { ...task.outbox, state: 'none' } })
-  await f.runtime.close()
-  const restarted = new MailRuntime(f.config, f.spool, f.deps)
-  f.cleanup.push(() => restarted.close())
-  await restarted.initialize(); await restarted.tick()
-  assert.equal(f.store.tasks()[0]?.state, 'needs_attention')
-  assert.equal(f.executed.length, 1)
-})
+for (const interrupted of ['starting', 'running'] as const) {
+  test(`process restart preserves accepted tasks and quarantines ${interrupted} side effects`, async () => {
+    await using t = new AsyncDisposableStack()
+    const f = await fixture(t)
+    await f.runtime.admit(f.delivery()); await f.finish()
+    const task = f.store.tasks()[0]!
+    await f.store.putTask({ ...task, state: interrupted, outbox: { ...task.outbox, state: 'none' } })
+    await f.runtime.close()
+    const restarted = new MailRuntime(f.config, f.spool, f.deps)
+    f.cleanup.defer(() => restarted.close())
+    await restarted.initialize(); await restarted.tick()
+    assert.equal(f.store.tasks()[0]?.state, 'needs_attention')
+    assert.equal(f.executed.length, 1)
+  })
+}
 
 test('restart during sending produces unknown without resubmitting', async () => {
   await using t = new AsyncDisposableStack()
@@ -162,7 +164,7 @@ test('restart during sending produces unknown without resubmitting', async () =>
   await f.store.putTask({ ...task, outbox: { ...task.outbox, state: 'sending' } })
   await f.runtime.close()
   const restarted = new MailRuntime(f.config, f.spool, f.deps)
-  f.cleanup.push(() => restarted.close())
+  f.cleanup.defer(() => restarted.close())
   await restarted.initialize(); await restarted.tick()
   assert.equal(f.store.tasks()[0]?.outbox.state, 'unknown'); assert.equal(f.sent.length, 1)
 })
@@ -176,7 +178,7 @@ test('workspace serialization is synchronized by an explicit execution barrier',
     peak = Math.max(peak, ++running); executions++; entered.resolve()
     await release.promise; running--; return { state: 'succeeded', summary: 'done', reason: '' }
   } } })
-  f.cleanup.push(async () => { release.resolve() })
+  f.cleanup.defer(async () => { release.resolve() })
   await f.runtime.admit(f.delivery(1)); await f.runtime.admit(f.delivery(2))
   await f.runtime.tick(); await entered.promise
   await f.runtime.tick()
@@ -218,7 +220,7 @@ test('persistent SQLite state reopens with the same deduplication and outbox rec
   assert.equal((await readFile(join(f.directory, 'state.sqlite'))).subarray(0, 6).toString(), 'SQLite')
   await f.store.close()
   const reopened = await DomainMailStore.open(f.facility)
-  f.cleanup.push(() => reopened.close())
+  f.cleanup.defer(() => reopened.close())
   assert.deepEqual(reopened.tasks(), before)
   assert.equal(reopened.inbox().length, 1)
 })
@@ -341,7 +343,7 @@ test('different accounts and workspaces can execute concurrently without starvin
     await release.promise
     return { state: 'succeeded', summary: 'done', reason: '' }
   } } })
-  f.cleanup.push(async () => { release.resolve() })
+  f.cleanup.defer(async () => { release.resolve() })
   const second = structuredClone(f.config.accounts[0]!)
   second.id = 'other'; f.config.accounts.push(second)
   const secondRule = structuredClone(f.config.rules[0]!)
@@ -368,7 +370,7 @@ test('authenticated email selects any existing directory without a root allowlis
   await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   const selected = await mkdtemp(join(tmpdir(), 'dsh-mail-selected-'))
-  f.cleanup.splice(1, 0, () => rm(selected, { recursive: true, force: true }))
+  f.directories.defer(() => rm(selected, { recursive: true, force: true }))
   await f.runtime.admit(f.delivery(1, message('[DSH] workspace', `---\nworkspace: ${JSON.stringify(selected)}\n---\nAnalyze this directory.`)))
   await f.finish()
   const task = f.executed[0]!
@@ -425,7 +427,7 @@ test.skipIf(process.platform === 'win32')('symlink aliases from email share the 
     runs++; entered.resolve(); await release.promise
     return { state: 'succeeded', summary: 'done', reason: '' }
   } } })
-  f.cleanup.push(async () => { release.resolve() })
+  f.cleanup.defer(async () => { release.resolve() })
   const actual = join(f.directory, 'actual')
   const alias = join(f.directory, 'alias')
   await mkdir(actual); await symlink(actual, alias, 'dir')
@@ -447,7 +449,7 @@ test('fixed-directory task records without the new selected-directory field stil
   await f.store.putTask(legacy)
   await f.store.close()
   const reopened = await DomainMailStore.open(f.facility)
-  f.cleanup.push(() => reopened.close())
+  f.cleanup.defer(() => reopened.close())
   assert.equal(taskWorkspace(reopened.tasks()[0]!), f.config.rules[0]!.task.workspacePath)
 })
 
@@ -511,6 +513,28 @@ test('an atomic task update failure blocks execution and reports the unavailable
   assert.equal(f.sent.length, 0)
   assert.deepEqual(f.reports, ['mail-runtime-blocked'])
   assert.equal(z.object({ blocked: z.boolean() }).parse(f.runtime.status()).blocked, true)
+})
+
+test('a completed execution whose settlement cannot be stored is blocked without a second settlement', async () => {
+  await using resources = new AsyncDisposableStack()
+  const f = await fixture(resources)
+  const update = f.store.updateTask.bind(f.store)
+  let settlements = 0
+  f.store.updateTask = (id, transform) => update(id, current => {
+    const next = transform(current)
+    if (!['queued', 'starting', 'running'].includes(next.state)) {
+      settlements++
+      if (next.state === 'succeeded') throw new Error('Fixture settlement storage unavailable')
+    }
+    return next
+  })
+  await f.runtime.admit(f.delivery()); await f.finish()
+  assert.equal(f.executed.length, 1)
+  assert.equal(settlements, 1)
+  assert.equal(f.store.tasks()[0]?.state, 'running')
+  assert.equal(f.sent.length, 0)
+  assert.deepEqual(f.reports, ['mail-runtime-blocked'])
+  await assert.rejects(f.runtime.admit(f.delivery(2)), /blocked/)
 })
 
 test('shutdown drains an admitted atomic update before releasing task ownership', async () => {
