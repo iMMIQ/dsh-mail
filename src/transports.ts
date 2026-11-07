@@ -19,11 +19,11 @@ export class ImapReceiver {
   constructor(private readonly account: Account, private readonly config: Config, private readonly runtime: MailRuntime, private readonly secret: ResolveSecret) {}
   /** Start supervised connections. Ready/blocked state is available through runtime status. */
   start(): void {
-    for (const folder of this.account.receive?.folders ?? []) this.active.push(this.watch(folder))
+    for (const folder of this.account.receive?.protocol === 'imap' ? this.account.receive.folders : []) this.active.push(this.watch(folder))
   }
   private async watch(folder: string): Promise<void> {
     const receive = this.account.receive
-    if (!receive) return
+    if (receive?.protocol !== 'imap') return
     const signal = this.controller.signal
     const healthKey = `${this.account.id}:${folder}`
     while (!signal.aborted) {

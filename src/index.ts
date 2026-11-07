@@ -15,6 +15,7 @@ import { verifySender } from './auth.ts'
 import { DshExecutor } from './session.ts'
 import { DomainMailStore, Spool } from './store.ts'
 import { MailRuntime } from './runtime.ts'
+import { Pop3Receiver } from './pop3-receiver.ts'
 import { ImapReceiver, smtpSender } from './transports.ts'
 import { MailError } from './types.ts'
 import { SessionNotifications } from './notifications.ts'
@@ -138,7 +139,6 @@ export class MailAutomation extends TypertRemoteService {
     resources.defer(() => spool.close())
     let store: DomainMailStore | undefined
     let runtime: MailRuntime | undefined
-    const receivers: ImapReceiver[] = []
     let timer: ReturnType<typeof setInterval> | undefined
     store = await DomainMailStore.open(ctx.storageDomain)
     const ownedStore = store
@@ -163,8 +163,7 @@ export class MailAutomation extends TypertRemoteService {
       await notifications.start()
     }
     for (const account of config.accounts.filter(a => a.receive)) {
-      const receiver = new ImapReceiver(account, config, active, secret)
-      receivers.push(receiver)
+      const receiver = account.receive?.protocol === 'pop3' ? new Pop3Receiver(account, config, active, secret) : new ImapReceiver(account, config, active, secret)
       resources.defer(() => receiver.close())
       receiver.start()
     }
@@ -181,7 +180,7 @@ export class MailAutomation extends TypertRemoteService {
     await this.changes
     return { phase: this.phase, health: Object.fromEntries(this.runtime?.health ?? []), defaultAgentPreset: this.ctx.agentPresets.defaultId }
   }
-  /** Test saved IMAP/SMTP login without reading mail or sending a message.
+  /** Test saved incoming/SMTP login without reading mail or sending a message.
    * @param accountId Saved account id.
    * @returns A bounded result for each configured protocol.
    */

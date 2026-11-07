@@ -30,7 +30,7 @@ export interface Mail {
   attachments: { name: string; contentType: string; content: Buffer }[]
 }
 
-/** Exact account/file/UID epoch identity received from a provider. */
+/** Stable provider identity; POP3 encodes the source and UIDL in uidValidity with uid zero. */
 export interface Delivery {
   account: string
   folder: string

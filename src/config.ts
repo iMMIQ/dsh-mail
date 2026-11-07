@@ -14,16 +14,20 @@ const connection = {
   ca: z.string().optional(),
 }
 
+const reception = {
+  initialSync: z.enum(['new-only', 'all']).default('new-only'),
+  rescanIntervalMs: ms.default(60_000),
+  maxMessageAgeMs: ms.default(172_800_000),
+}
+
 /** Account schema shared by config validation and durable task snapshots. */
 export const accountSchema = z.strictObject({
   id, address,
-  receive: z.strictObject({
+  receive: z.discriminatedUnion('protocol', [z.strictObject({
     protocol: z.literal('imap'), ...connection,
     folders: z.array(line).min(1).refine(values => new Set(values).size === values.length, 'duplicate mailbox folder').default(['INBOX']),
-    initialSync: z.enum(['new-only', 'all']).default('new-only'),
-    rescanIntervalMs: ms.default(60_000),
-    maxMessageAgeMs: ms.default(172_800_000),
-  }).optional(),
+    ...reception,
+  }), z.strictObject({ protocol: z.literal('pop3'), ...connection, ...reception })]).optional(),
   send: z.strictObject({ protocol: z.literal('smtp'), ...connection }).optional(),
 }).refine(a => a.receive !== undefined || a.send !== undefined, 'account needs receive or send')
 
@@ -91,7 +95,7 @@ export const Config = z.strictObject({
   for (const [name, entries] of [['accounts', config.accounts], ['rules', config.rules]] as const) {
     if (new Set(entries.map(e => e.id)).size !== entries.length) ctx.addIssue({ code: 'custom', message: `duplicate ${name} id` })
   }
-  if (config.accounts.reduce((count, account) => count + (account.receive?.folders.length ?? 0), 0) > config.runtime.maxImapConnections) ctx.addIssue({ code: 'custom', message: 'mailbox folder count exceeds maxImapConnections' })
+  if (config.accounts.reduce((count, account) => count + (account.receive?.protocol === 'imap' ? account.receive.folders.length : 0), 0) > config.runtime.maxImapConnections) ctx.addIssue({ code: 'custom', message: 'mailbox folder count exceeds maxImapConnections' })
   for (const rule of config.rules) {
     if (!config.accounts.find(a => a.id === rule.account)?.receive) ctx.addIssue({ code: 'custom', message: `${rule.id}: receive account not found` })
     if (!config.accounts.find(a => a.id === rule.reply.account)?.send) ctx.addIssue({ code: 'custom', message: `${rule.id}: send account not found` })

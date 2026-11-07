@@ -13,15 +13,17 @@ import { parseMail } from '../src/mail.ts'
 import { Config } from '../src/config.ts'
 import { configuration, message } from './helpers.ts'
 import { mailServers, waitFor } from './network.ts'
+import { pop3Server } from './pop3-network.ts'
 
 const host = z.object({ version: z.string(), dependencies: z.record(z.string(), z.string()) }).parse(JSON.parse(await readFile(resolve('node_modules/@deepseek-ai/dsh/package.json'), 'utf8')))
 
-async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure' | 'conversation' | 'external' | 'markdown'): Promise<void> {
+async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure' | 'conversation' | 'external' | 'markdown', protocol: 'imap' | 'pop3' = 'imap'): Promise<void> {
   const success = scenario === 'success' || scenario === 'reconfigure'
   await using resources = new AsyncDisposableStack()
   const root = await mkdtemp(join(tmpdir(), 'dsh-mail-profile-'))
   resources.defer(() => rm(root, { recursive: true, force: true }))
   const servers = await mailServers(resources)
+  const pop3 = protocol === 'pop3' ? await pop3Server(resources, 'starttls') : undefined
   let child: ChildProcess | undefined
   let exit: Promise<void> | undefined
   let exited = false
@@ -57,6 +59,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   }
   config.runtime.tickIntervalMs = 20
   Object.assign(config.accounts[0]!.receive!, { host: '127.0.0.1', port: servers.imapPort, ca: servers.ca, rescanIntervalMs: 50, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
+  if (pop3) config.accounts[0]!.receive = { protocol: 'pop3', host: '127.0.0.1', port: pop3.port, tls: 'starttls', ca: pop3.ca, rescanIntervalMs: 50, initialSync: 'new-only', maxMessageAgeMs: 172_800_000, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } }
   Object.assign(config.accounts[0]!.send!, { host: '127.0.0.1', port: servers.smtpPort, ca: servers.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
   const configs: Record<string, object> = {
     hmr: { root: [] },
@@ -100,7 +103,8 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     const send = (id: string, body: string, parent?: string): void => {
       const raw = message(parent ? '回复：continue with a different title' : '[DSH] remember', body, parent ? [`In-Reply-To: ${parent}`, `References: ${parent}`] : [])
         .toString().replace('<fixture@example.com>', `<${id}@example.com>`)
-      servers.imap.appendMessage('INBOX', [], new Date(), raw)
+      if (pop3) pop3.messages.push({ uid: id, raw: Buffer.from(raw) })
+      else servers.imap.appendMessage('INBOX', [], new Date(), raw)
     }
     const control = async (id: string, text: string): Promise<void> => {
       await writeFile(join(root, 'control.tmp'), JSON.stringify({ id, text }))
@@ -133,7 +137,8 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     send('queued', 'Report the remembered color again.', first.messageId)
     const queuedRaw = message('Re: [DSH] duplicate', 'Report the remembered color again.', [`In-Reply-To: ${first.messageId}`]).toString().replace('<fixture@example.com>', '<queued@example.com>')
     // Same Message-ID with different content is quarantined, not executed twice.
-    servers.imap.appendMessage('INBOX', [], new Date(), queuedRaw)
+    if (pop3) pop3.messages.push({ uid: 'queued-duplicate', raw: Buffer.from(queuedRaw) })
+    else servers.imap.appendMessage('INBOX', [], new Date(), queuedRaw)
     await waitFor(async () => {
       const current = z.object({ tasks: z.array(z.object({ state: z.string() })) }).parse(JSON.parse(await readFile(join(root, 'status.json'), 'utf8')))
       return current.tasks.some(task => task.state === 'queued')
@@ -178,7 +183,9 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     assert.ok(received.every(mail => mail.headers.some(header => header.key === 'reply-to' && header.line.includes('bot@example.com'))))
     return
   }
-  servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`).toString())
+  const taskMail = message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`)
+  if (pop3) pop3.messages.push({ uid: 'profile-task', raw: taskMail })
+  else servers.imap.appendMessage('INBOX', [], new Date(), taskMail.toString())
   await waitFor(() => servers.received.length === 1, () => `result mail; ${output}`)
   const mime = await simpleParser(servers.received[0]!)
   assert.equal(typeof mime.html, 'string')
@@ -227,7 +234,7 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   const actual = { input: users[0]!.data.content.map(part => part.text).join('').replace(emailDirectory, '{{workspace}}'), calls, turnEnds: ends, permissions,
     reply: response.body.replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(/Session: mail-[a-f0-9]{64}/, 'Session: {{sessionId}}').replace(emailDirectory, '{{workspace}}').trim() }
   const snapshots = { success: 'mail-turn', 'text-only': 'mail-text-result', 'empty-result': 'mail-missing-result', 'model-error': 'mail-error', reconfigure: 'mail-turn', markdown: 'mail-markdown' }
-  const expected: unknown = JSON.parse(await readFile(resolve(`tests/snapshots/${snapshots[scenario]}.json`), 'utf8'))
+  const expected: unknown = JSON.parse(await readFile(resolve(`tests/snapshots/${protocol === 'pop3' ? 'mail-pop3' : snapshots[scenario]}.json`), 'utf8'))
   assert.deepEqual(actual, expected)
   assert.doesNotMatch(response.body, /PRIVATE_FIXTURE_REASONING/)
   if (scenario === 'reconfigure') {
@@ -254,3 +261,7 @@ test('email replies preserve one real DSH conversation through queueing and a pr
 test('a non-mail DSH session notifies, accepts replies and preserves its original permissions across restart', () => profileScenario('external'), 90_000)
 
 test('a real DSH Markdown response is delivered as styled HTML with its original plain-text alternative', () => profileScenario('markdown'), 60_000)
+
+test('POP3 STLS starts a real DSH Session, executes a tool and replies through SMTP', () => profileScenario('success', 'pop3'), 60_000)
+
+test('POP3 replies continue a real DSH Session across queueing and a process restart', () => profileScenario('conversation', 'pop3'), 90_000)

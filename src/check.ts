@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Read-only mailbox login checks; SMTP verification never sends a message. */
+import { Pop3Connection } from './pop3.ts'
 import { ImapFlow } from 'imapflow'
 import nodemailer from 'nodemailer'
 import type { Account } from './config.ts'
 import type { ResolveSecret } from './transports.ts'
 
 /** Only fixed result codes cross the UI boundary; transport errors and secrets do not. */
-export interface ConnectionCheck { imap: 'ok' | 'failed' | 'absent'; smtp: 'ok' | 'failed' | 'absent' }
+export interface ConnectionCheck { imap: 'ok' | 'failed' | 'absent'; smtp: 'ok' | 'failed' | 'absent'; pop3?: 'ok' | 'failed' }
 
 /** Check the configured account using current credentials and trusted TLS.
  * @param account Saved account to verify.
@@ -17,7 +18,17 @@ export interface ConnectionCheck { imap: 'ok' | 'failed' | 'absent'; smtp: 'ok' 
  */
 export async function checkConnection(account: Account, secret: ResolveSecret, timeoutMs: number, signal: AbortSignal): Promise<ConnectionCheck> {
   const result: ConnectionCheck = { imap: 'absent', smtp: 'absent' }
-  if (account.receive) {
+  if (account.receive?.protocol === 'pop3') {
+    let client: Pop3Connection | undefined
+    try {
+      const password = await secret(account.receive.auth.credentialRef)
+      client = await Pop3Connection.open(account.receive, password, timeoutMs, signal)
+      await client.quit()
+      result.pop3 = 'ok'
+    } catch (_error) { result.pop3 = 'failed' }
+    finally { await client?.close() }
+  }
+  if (account.receive?.protocol === 'imap') {
     const receive = account.receive
     let client: ImapFlow | undefined
     const abort = (): void => client?.close()

@@ -350,3 +350,49 @@ test('global notifications and exact trusted internal addresses are saved withou
     assert.equal(page.store.getSnapshot().invalid, true)
   } finally { await page.dispose() }
 })
+
+test('switching incoming protocol updates standard ports, preserves custom ports and restores IMAP folders', async () => {
+  const { page, scope } = fixture()
+  try {
+    page.editAccount('receive.folders', 'INBOX, Tasks')
+    page.editAccount('receive.protocol', 'pop3')
+    let receive = page.store.getSnapshot().draft!.accounts[0]!.receive!
+    assert.equal(receive.protocol, 'pop3')
+    assert.equal(receive.port, 995)
+    assert.equal('folders' in receive, false)
+    assert.equal(receive.auth.credentialRef, 'MAIL_PASSWORD')
+    page.editAccount('receive.tls', 'starttls')
+    assert.equal(page.store.getSnapshot().draft!.accounts[0]!.receive!.port, 110)
+    page.editAccount('receive.protocol', 'imap')
+    receive = page.store.getSnapshot().draft!.accounts[0]!.receive!
+    assert.equal(receive.port, 143)
+    assert.equal(receive.protocol, 'imap')
+    assert.ok(receive.protocol === 'imap')
+    assert.deepEqual(receive.folders, ['INBOX', 'Tasks'])
+    page.editAccount('receive.port', '21110')
+    page.editAccount('receive.protocol', 'pop3')
+    page.editAccount('receive.tls', 'direct')
+    assert.equal(page.store.getSnapshot().draft!.accounts[0]!.receive!.port, 21110)
+    await page.save()
+    assert.equal(scope.state.value!.accounts[0]!.receive!.protocol, 'pop3')
+    assert.equal(scope.state.value!.accounts[0]!.receive!.port, 21110)
+    assert.equal('folders' in scope.state.value!.accounts[0]!.receive!, false)
+  } finally { await page.dispose() }
+})
+
+test('a failed POP3 connection prevents save-and-enable from starting mail', async () => {
+  const { page, scope, api } = fixture()
+  try {
+    await page.refreshCredentials()
+    page.editAccount('receive.protocol', 'pop3')
+    api.checkConnection = async () => ({ ok: true, value: { imap: 'absent', pop3: 'failed', smtp: 'ok' } })
+    await page.start()
+    assert.equal(scope.state.value!.enabled, false)
+    assert.equal(page.store.getSnapshot().check?.pop3, 'failed')
+    assert.equal(page.store.getSnapshot().toast?.message, 'checkFailed')
+    api.checkConnection = async () => ({ ok: true, value: { imap: 'absent', pop3: 'ok', smtp: 'ok' } })
+    await page.start()
+    assert.equal(scope.state.value!.enabled, true)
+    assert.equal(page.store.getSnapshot().toast?.message, 'started')
+  } finally { await page.dispose() }
+})

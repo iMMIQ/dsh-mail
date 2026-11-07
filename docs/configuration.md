@@ -9,11 +9,21 @@
 - `stateDirectory`：可写的绝对目录，用于原始邮件和本机运行锁，默认 `~/.dsh/mail`。多个实例需使用不同目录；迁移时保留原有邮件数据。
 - `accounts[].id`：账户名称，供规则引用。
 - `accounts[].address`：该账户的邮箱地址。
-- `receive` / `send`：分别配置 IMAP 和 SMTP；一个账户可仅用于收信或发信。
+- `receive` / `send`：分别配置 IMAP / POP3 收信和 SMTP 发信；一个账户可仅用于收信或发信。
 - `host`、`port`、`tls`：按服务商填写。`direct` 表示直接 TLS，`starttls` 表示 STARTTLS；证书必须可信。内部 CA 的 PEM 公钥证书可填入 `ca`，也可在 UI 的服务器选项中粘贴。
 - `auth.user`、`auth.credentialRef`：登录名和 DSH 凭据名称。密码通过 DSH 凭据来源提供，不写入补丁。
 
-多个邮箱分别使用不同的 `id` 和凭据名称。收信账户默认监听 `INBOX`，首次启动只建立基线，不执行历史邮件；`receive.initialSync: all` 可在首次建立游标时扫描历史邮件，仍受邮件年龄限制。默认最大邮件年龄为两天，重新启动不会重置游标。
+多个邮箱分别使用不同的 `id` 和凭据名称。IMAP 默认监听 `INBOX`，两种收信协议首次启动均只建立基线，不执行历史邮件；`receive.initialSync: all` 可在首次建立游标时扫描历史邮件，IMAP 仍按服务器收信时间限制邮件年龄；POP3 不提供可信收信时间，以首次发现时间计算，无法过滤首次全量扫描中的历史邮件。默认最大邮件年龄为两天，重新启动不会重置游标。
+
+在“服务器与登录选项”中选择收信协议，切换协议或连接安全时会自动调整标准端口，自定义端口保留。常见组合如下：
+
+| 协议 | `protocol` | 直接 TLS | STARTTLS / STLS |
+| --- | --- | --- | --- |
+| IMAP 收信 | `imap` | 993 | 143 |
+| POP3 收信 | `pop3` | 995 | 110 |
+| SMTP 发信 | `smtp` | 465 | 587 |
+
+手动使用 POP3 时设置 `receive.protocol: pop3`、对应端口，并移除仅属于 IMAP 的 `folders`。`receive.rescanIntervalMs` 控制轮询间隔，默认 60000 毫秒；IMAP 还会响应服务器的新邮件通知。POP3 要求服务器支持稳定且互不重复的 UIDL，仅读取收件箱，不发送删除命令；缺少 UIDL 时停止该次扫描并报告连接异常。切换到 POP3 或更换其服务器、端口或登录名会建立新基线。UIDL 状态随插件数据持久化，邮件编号变化或重启不会重复创建已接收的任务。连接检查只验证登录，不下载邮件。
 
 示例通过环境变量 `MAIL_PASSWORD` 提供邮箱授权码；也可以使用已有的 DSH 凭据存储。示例沿用 DSH 当前默认 Agent 模式和模型；默认的 `danger-full-access` 权限 preset 必须存在于所选 profile。
 

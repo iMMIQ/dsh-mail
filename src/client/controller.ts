@@ -89,6 +89,7 @@ export class MailPageController {
   private statusRead = 0
   private checkRead = 0
   private discardAfterSave = false
+  private readonly imapFolders = new Map<string, string[]>()
   private readonly protocolDrafts = new Map<string, Pick<Account, 'receive' | 'send'>>()
   private statusTimer: ReturnType<typeof setTimeout> | undefined
   private watchers = 0
@@ -150,6 +151,7 @@ export class MailPageController {
     this.edit(draft => { draft.accounts = draft.accounts.filter(account => account.id !== id); draft.rules = draft.rules.filter(rule => rule.account !== id && rule.reply.account !== id); if (draft.notifications.rule && !draft.rules.some(rule => rule.id === draft.notifications.rule)) delete draft.notifications.rule; if (!draft.rules.length) draft.notifications.enabled = false })
     const keep = new Set(refs(this.state().draft!))
     this.protocolDrafts.delete(id)
+    this.imapFolders.delete(id)
     this.publish({ credentials: Object.fromEntries(Object.entries(this.state().credentials).filter(([ref]) => keep.has(ref))), fields: {} })
     this.selectAccount(this.state().draft?.accounts[0]?.id ?? '')
   }
@@ -227,17 +229,29 @@ export class MailPageController {
       const [side, key] = field.split('.')
       const connection = side === 'receive' ? account.receive : side === 'send' ? account.send : undefined
       if (!connection) return
+      if (key === 'protocol' && side === 'receive' && account.receive && (text === 'imap' || text === 'pop3') && account.receive.protocol !== text) {
+        const previous = account.receive
+        const standardPort = previous.protocol === 'imap' ? [993, 143] : [995, 110]
+        const { protocol: _protocol, ...common } = previous
+        const port = standardPort.includes(previous.port) ? text === 'imap' ? previous.tls === 'direct' ? 993 : 143 : previous.tls === 'direct' ? 995 : 110 : previous.port
+        if (previous.protocol === 'imap') {
+          this.imapFolders.set(id, previous.folders)
+          const { folders: _folders, ...pop3 } = previous
+          account.receive = { ...pop3, protocol: 'pop3', port }
+        } else account.receive = { ...common, protocol: 'imap', port, folders: this.imapFolders.get(id) ?? ['INBOX'] }
+        resetPort = true
+      }
       if (key === 'host') connection.host = text
       if (key === 'user') connection.auth.user = text
       if (key === 'port' && /^\d+$/.test(text)) connection.port = Number(text)
       if (key === 'tls' && (text === 'direct' || text === 'starttls')) {
-        const direct = side === 'receive' ? 993 : 465
-        const starttls = side === 'receive' ? 143 : 587
+        const direct = side === 'receive' ? connection.protocol === 'pop3' ? 995 : 993 : 465
+        const starttls = side === 'receive' ? connection.protocol === 'pop3' ? 110 : 143 : 587
         if (connection.port === direct || connection.port === starttls) { connection.port = text === 'direct' ? direct : starttls; resetPort = true }
         connection.tls = text
       }
       if (key === 'ca') { if (text.trim()) connection.ca = text; else delete connection.ca }
-      if (key === 'folders' && side === 'receive' && account.receive) account.receive.folders = split(text)
+      if (key === 'folders' && side === 'receive' && account.receive?.protocol === 'imap') account.receive.folders = split(text)
     }, [`account.${id}.${field}`, text])
     if (field === 'mode') this.publish({ fields: Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => !key.startsWith(`account.${id}.`))) })
     if (resetPort) this.publish({ fields: Object.fromEntries(Object.entries(this.state().fields).filter(([key]) => key !== `account.${id}.${field.split('.')[0]}.port`)) })
@@ -331,7 +345,7 @@ export class MailPageController {
   discard(): void {
     if (this.state().saving) { this.discardAfterSave = true; this.publish({ credentials: {} }); return }
     this.publish({ dirty: false, fields: {}, credentials: {}, check: undefined, failed: false })
-    this.protocolDrafts.clear()
+    this.protocolDrafts.clear(); this.imapFolders.clear()
     this.accept()
   }
   async save(): Promise<void> {
@@ -393,7 +407,7 @@ export class MailPageController {
         if (this.scope.getSnapshot().revision !== this.baseline) { this.publish({ failed: true }); this.notice('conflict', false); return }
         if (!answer.ok) throw new Error('Connection check refused')
         this.publish({ check: answer.value })
-        if (answer.value.imap === 'failed' || answer.value.smtp === 'failed') { this.notice('checkFailed', false); return }
+        if (answer.value.imap === 'failed' || answer.value.pop3 === 'failed' || answer.value.smtp === 'failed') { this.notice('checkFailed', false); return }
       }
       this.publish({ checking: false, draft: { ...this.state().draft!, enabled: true }, dirty: true })
       await this.save()
@@ -411,7 +425,7 @@ export class MailPageController {
       if (this.disposed || generation !== this.checkRead) return
       if (!result.ok) throw new Error('Check failed')
       if (this.state().accountId === account) this.publish({ check: result.value })
-      this.notice(result.value.imap !== 'failed' && result.value.smtp !== 'failed' ? 'checkOk' : 'checkFailed', result.value.imap !== 'failed' && result.value.smtp !== 'failed')
+      this.notice(result.value.imap !== 'failed' && result.value.pop3 !== 'failed' && result.value.smtp !== 'failed' ? 'checkOk' : 'checkFailed', result.value.imap !== 'failed' && result.value.pop3 !== 'failed' && result.value.smtp !== 'failed')
     } catch (_error) { if (!this.disposed && generation === this.checkRead) this.notice('checkFailed', false) }
     finally { this.publish({ checking: false }) }
   }
@@ -426,5 +440,5 @@ export class MailPageController {
       dismissToast: () => this.publish({ toast: undefined }) }
   }
   /** Stop subscriptions, erase authorization drafts, and drain admitted writes. */
-  async dispose(): Promise<void> { this.disposed = true; clearTimeout(this.statusTimer); this.protocolDrafts.clear(); this.unsubscribe(); this.store.set({ ...this.state(), credentials: {}, draft: undefined }); await Promise.allSettled(this.pending) }
+  async dispose(): Promise<void> { this.disposed = true; clearTimeout(this.statusTimer); this.protocolDrafts.clear(); this.imapFolders.clear(); this.unsubscribe(); this.store.set({ ...this.state(), credentials: {}, draft: undefined }); await Promise.allSettled(this.pending) }
 }

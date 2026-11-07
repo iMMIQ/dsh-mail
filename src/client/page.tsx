@@ -89,6 +89,7 @@ export function MailPage(props: PageProps) {
               <div className="mail-row"><span>{t('sameServer')}</span><Switch label={t('sameServer')} checked={!state.separateServers} disabled={disabled} onChange={checked => props.setSeparateServers(!checked)} /></div>
               {state.separateServers && accountField('send.host', 'outgoingServer', account.send.host)}
             </>}
+            {account.receive && options('receiveProtocol', account.receive.protocol, [{ id: 'imap', label: 'IMAP' }, { id: 'pop3', label: 'POP3' }], text => props.editAccount('receive.protocol', text))}
             <div className="mail-grid">{(['receive', 'send'] as const).map(side => {
               const connection = account[side]
               if (!connection) return null
@@ -105,14 +106,15 @@ export function MailPage(props: PageProps) {
               {account.receive.auth.credentialRef !== account.send.auth.credentialRef && secret(account.send.auth.credentialRef, 'mail-outgoing-password', 'outgoingCode')}
             </>}
             {password?.configured && primaryConnection && <div><Button size="sm" disabled={disabled || !password.writable} onClick={() => props.removeCredential(primaryConnection.auth.credentialRef)}>{t(password.remove ? 'undoRemoveCode' : 'removeCode')}</Button></div>}
-            {account.receive && accountField('receive.folders', 'folders', account.receive.folders.join(', '))}
+            {account.receive?.protocol === 'imap' && accountField('receive.folders', 'folders', account.receive.folders.join(', '))}
+            {account.receive?.protocol === 'pop3' && <p className="mail-hint">{t('pop3Hint')}</p>}
             <div><Button variant="outline" size="sm" disabled={state.dirty || state.checking || disabled} onClick={props.checkConnection}>{t(state.checking ? 'checking' : 'check')}</Button></div>
           </> : <p className="mail-hint">{t('passwordFirst')}</p>}
         </div></details>
         {state.check && <div className="mail-connection-result" role="status">
           {draft && draft.accounts.length > 1 && <span>{checkedAccount?.address}</span>}
-          <span>{t('receiveShort')}: {t(state.check.imap)}</span><span>{t('sendShort')}: {t(state.check.smtp)}</span>
-          {(state.check.imap === 'failed' || state.check.smtp === 'failed') && <p className="mail-hint">{t('connectionFailedHint')}</p>}
+          <span>{t('receiveShort')}: {t(state.check.pop3 ?? state.check.imap)}</span><span>{t('sendShort')}: {t(state.check.smtp)}</span>
+          {(state.check.imap === 'failed' || state.check.pop3 === 'failed' || state.check.smtp === 'failed') && <p className="mail-hint">{t('connectionFailedHint')}</p>}
         </div>}
       </section>
       <section className="mail-section" aria-label={t('senderTitle')}>
