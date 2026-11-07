@@ -45,6 +45,7 @@ export interface MailPageFace {
   setSeparateServers(separate: boolean): void
   editSetting(field: 'maxReplyBytes' | 'maxConcurrentTasks', text: string): void
   editCredential(ref: string, text: string): void; removeCredential(ref: string): void
+  setNotifications(enabled: boolean): void
   setEnabled(enabled: boolean): void
   watchStatus(): () => void
   save(): void; start(): void; discard(): void; checkConnection(): void; refresh(): void; dismissToast(): void
@@ -64,7 +65,7 @@ function valid(value: MailSettings, fields: Record<string, string>): boolean {
   return value.accounts.every(account => z.email().safeParse(account.address).success && Boolean(account.receive || account.send) && [account.receive, account.send].every(connection => !connection || Boolean(connection.host.trim() && !connection.host.includes('://') && connection.auth.user.trim() && connection.port > 0 && connection.port <= 65535
       && (!connection.ca || connection.ca.includes('-----BEGIN CERTIFICATE-----') && !/-----BEGIN[^\n]*PRIVATE KEY-----/.test(connection.ca)))))
     && value.runtime.maxReplyBytes >= 1024
-    && Object.values(value.senderPolicies).every(policy => policy.evidence !== 'trusted-mta' || policy.authservIds.length > 0)
+    && Object.values(value.senderPolicies).every(policy => policy.evidence === 'trusted-mta' ? policy.authservIds.length > 0 : (policy.trustedSenders ?? []).every(address => z.email().safeParse(address).success))
     && value.rules.every(rule => value.accounts.some(account => account.id === rule.account && account.receive) && value.accounts.some(account => account.id === rule.reply.account && account.send) && rule.authorization.allowedSenders.length > 0
       && rule.authorization.allowedSenders.every(address => z.email().safeParse(address).success) && z.email().safeParse(rule.reply.to).success
       && Boolean((rule.task.agentPreset === undefined || rule.task.agentPreset.trim()) && rule.task.permissionPreset.trim()) && Boolean(value.senderPolicies[rule.authorization.policy]) && Boolean(value.templates[rule.task.template]?.trim()))
@@ -146,7 +147,7 @@ export class MailPageController {
   }
   removeAccount(): void {
     const id = this.state().accountId
-    this.edit(draft => { draft.accounts = draft.accounts.filter(account => account.id !== id); draft.rules = draft.rules.filter(rule => rule.account !== id && rule.reply.account !== id) })
+    this.edit(draft => { draft.accounts = draft.accounts.filter(account => account.id !== id); draft.rules = draft.rules.filter(rule => rule.account !== id && rule.reply.account !== id); if (draft.notifications.rule && !draft.rules.some(rule => rule.id === draft.notifications.rule)) delete draft.notifications.rule; if (!draft.rules.length) draft.notifications.enabled = false })
     const keep = new Set(refs(this.state().draft!))
     this.protocolDrafts.delete(id)
     this.publish({ credentials: Object.fromEntries(Object.entries(this.state().credentials).filter(([ref]) => keep.has(ref))), fields: {} })
@@ -199,7 +200,7 @@ export class MailPageController {
     if (!separate) this.edit(draft => { const account = draft.accounts.find(a => a.id === this.state().accountId); if (account?.receive && account.send) account.send.host = account.receive.host })
     this.publish({ separateServers: separate })
   }
-  removeRule(): void { const id = this.state().ruleId; this.edit(draft => { draft.rules = draft.rules.filter(rule => rule.id !== id) }); this.publish({ fields: {} }); this.selectRule(this.state().draft?.rules.find(rule => rule.account === this.state().accountId)?.id ?? '') }
+  removeRule(): void { const id = this.state().ruleId; this.edit(draft => { draft.rules = draft.rules.filter(rule => rule.id !== id); if (draft.notifications.rule === id) delete draft.notifications.rule; if (!draft.rules.length) draft.notifications.enabled = false }); this.publish({ fields: {} }); this.selectRule(this.state().draft?.rules.find(rule => rule.account === this.state().accountId)?.id ?? '') }
   editAccount(field: string, text: string): void {
     const id = this.state().accountId
     let resetPort = false
@@ -261,6 +262,7 @@ export class MailPageController {
       else if (field === 'policy') rule.authorization.policy = text
       else if (field === 'evidence') draft.senderPolicies[rule.authorization.policy] = text === 'trusted-mta'
         ? { evidence: 'trusted-mta', authservIds: [], stripsUntrustedHeaders: true } : { evidence: 'local-signature' }
+      else if (field === 'trustedSenders') { const policy = draft.senderPolicies[rule.authorization.policy]; if (policy?.evidence === 'local-signature') { const senders = split(text); if (senders.length) policy.trustedSenders = senders; else delete policy.trustedSenders } }
       else if (field === 'authservIds') { const policy = draft.senderPolicies[rule.authorization.policy]; if (policy?.evidence === 'trusted-mta') policy.authservIds = split(text) }
     }, [`rule.${id}.${field}`, text])
     if (field === 'account') { this.selectAccount(text); this.selectRule(id) }
@@ -268,6 +270,7 @@ export class MailPageController {
   editSetting(field: 'maxReplyBytes' | 'maxConcurrentTasks', text: string): void {
     this.edit(draft => { if (/^\d+$/.test(text)) draft.runtime[field] = Number(text) }, [field, text])
   }
+  setNotifications(enabled: boolean): void { this.edit(draft => { draft.notifications.enabled = enabled }) }
   setEnabled(enabled: boolean): void { this.edit(draft => { draft.enabled = enabled }) }
   editCredential(ref: string, text: string): void {
     const current = this.state().credentials[ref]
@@ -418,7 +421,7 @@ export class MailPageController {
       addAccount: () => this.addAccount(), removeAccount: () => this.removeAccount(), addRule: () => this.addRule(), removeRule: () => this.removeRule(),
       editSetup: (field, text) => this.editSetup(field, text), setSeparateServers: separate => this.setSeparateServers(separate),
       editAccount: (field, text) => this.editAccount(field, text), editRule: (field, text) => this.editRule(field, text), editSetting: (field, text) => this.editSetting(field, text),
-      editCredential: (ref, text) => this.editCredential(ref, text), removeCredential: ref => this.removeCredential(ref), setEnabled: enabled => this.setEnabled(enabled),
+      editCredential: (ref, text) => this.editCredential(ref, text), removeCredential: ref => this.removeCredential(ref), setEnabled: enabled => this.setEnabled(enabled), setNotifications: enabled => this.setNotifications(enabled),
       save: () => this.run(() => this.save()), start: () => this.run(() => this.start()), discard: () => this.discard(), checkConnection: () => this.run(() => this.checkConnection()), refresh: () => this.run(async () => { await Promise.all([this.refresh(), this.refreshCredentials()]) }), watchStatus: () => this.watchStatus(),
       dismissToast: () => this.publish({ toast: undefined }) }
   }

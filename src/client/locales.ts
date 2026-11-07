@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Mail configuration page copy, owned by this plugin. */
 export const en = {
+  trustedSenders: 'Trusted internal addresses', trustedSendersHint: 'Skip DKIM only for these exact addresses. The allowed-sender list still applies.',
+  notificationsTitle: 'Email results from other DSH sessions', notificationsHint: 'Notify after each root turn in this DSH instance. Results use the notification rule, or the first rule by default. Subagents do not send separate emails.', conversationHint: 'Reply above the quoted history to continue the same DSH session. Follow-up emails keep its working directory.',
   connectTitle: 'Connect your mailbox', connectHint: 'Use the server and sign-in details for your internal mailbox.',
   inheritDsh: 'Agent mode and model follow your current DSH settings.', agentPresetHint: 'Leave blank to follow the DSH default when each task starts.',
   customPermissionHint: 'Tasks use the permission preset selected under task options. Only allow senders you trust.',
@@ -36,6 +38,8 @@ export const en = {
 /** Locale keys shared by page, fields and toast host. */
 export type MailLocaleKey = keyof typeof en
 export const zh: Record<MailLocaleKey, string> = {
+  trustedSenders: '信任的内部邮箱', trustedSendersHint: '仅对这些完整邮箱地址跳过 DKIM 校验，允许发件人列表仍然生效',
+  notificationsTitle: '其他 DSH 会话也发送邮件通知', notificationsHint: '当前 DSH 实例的主会话每轮结束后发送通知，默认使用第一条规则的回信配置；子 Agent 不单独发信', conversationHint: '直接在历史引用上方回复即可继续同一 DSH 会话，后续邮件沿用原工作目录',
   connectTitle: '连接内部邮箱', connectHint: '填写邮箱的服务器和登录信息',
   inheritDsh: 'Agent 模式和模型沿用 DSH 当前设置', agentPresetHint: '留空沿用 DSH 默认预设，每次任务启动时读取',
   customPermissionHint: '任务使用执行选项中的权限预设，请只填写你信任的发件邮箱',

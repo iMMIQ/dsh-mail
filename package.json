@@ -73,6 +73,7 @@
   },
   "dependencies": {
     "@whatwg-node/disposablestack": "0.1.0",
+    "email-reply-parser": "2.3.9",
     "imapflow": "2.10.0",
     "js-yaml": "5.5.0",
     "mailauth": "8.0.4",

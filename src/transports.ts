@@ -132,6 +132,7 @@ export function smtpSender(config: Config, secret: ResolveSecret): (task: TaskRe
     signal.addEventListener('abort', abort, { once: true })
     try {
       const info: SMTPTransport.SentMessageInfo = await transport.sendMail({ from: account.address, to: task.rule.reply.to,
+        replyTo: config.accounts.find(account => account.id === task.account)?.address,
         subject: task.outbox.subject, text: task.outbox.text, messageId: task.outbox.messageId,
         ...(task.originalMessageId ? { inReplyTo: task.originalMessageId, references: [...task.references, task.originalMessageId].slice(-20) } : {}),
         headers: { 'Auto-Submitted': 'auto-replied', 'X-DSH-Mail-Task': task.id },

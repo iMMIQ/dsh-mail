@@ -24,7 +24,7 @@ export function message(subject = '[DSH] report', body = 'Summarize the reposito
 
 /** Full validated config; literal endpoints here are parser inputs, not acquired ports. */
 export function configuration(directory: string): Config {
-  return Config.parse({ stateDirectory: directory,
+  return Config.parse({ stateDirectory: directory, notifications: { receipts: false },
     accounts: [{ id: 'work', address: 'bot@example.com',
       receive: { protocol: 'imap', host: 'localhost', port: 993, tls: 'direct', auth: { user: 'bot', credentialRef: 'MAIL_PASSWORD' } },
       send: { protocol: 'smtp', host: 'localhost', port: 465, tls: 'direct', auth: { user: 'bot', credentialRef: 'MAIL_PASSWORD' } } }],
@@ -66,7 +66,7 @@ export async function fixture(t: AsyncDisposableStack, override: Partial<Runtime
   const runtime = new MailRuntime(config, spool, deps)
   cleanup.push(() => runtime.close())
   await runtime.initialize()
-  const delivery = (uid = 1, raw = message()): Delivery => ({ account: 'work', folder: 'INBOX', uidValidity: '1', uid, receivedAt: now, raw })
+  const delivery = (uid = 1, raw = message()): Delivery => ({ account: 'work', folder: 'INBOX', uidValidity: '1', uid, receivedAt: now, raw: Buffer.from(raw.toString().replace('Message-ID: <fixture@example.com>', `Message-ID: <fixture-${uid}@example.com>`)) })
   const finish = async (): Promise<void> => { await runtime.tick(); await runtime.whenSettled(); now += 10; await runtime.tick() }
   return { directory, config, store, facility, spool, runtime, deps, executed, sent, reports, cleanup, delivery, finish, advance: () => { now += 10_000 } }
 }

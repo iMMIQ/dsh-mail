@@ -333,3 +333,20 @@ test('enabling multiple mailboxes stops when any saved connection fails', async 
     assert.equal(page.store.getSnapshot().toast?.message, 'checkFailed')
   } finally { await page.dispose() }
 })
+
+
+test('global notifications and exact trusted internal addresses are saved without replacing DKIM', async () => {
+  const { page, scope } = await setup()
+  try {
+    page.setNotifications(true)
+    page.editRule('trustedSenders', 'owner@company.local')
+    await page.save()
+    const current = scope.state.value!
+    assert.equal(current.notifications.enabled, true)
+    const policy = current.senderPolicies[current.rules[0]!.authorization.policy]!
+    assert.equal(policy.evidence, 'local-signature')
+    assert.deepEqual(policy.evidence === 'local-signature' && policy.trustedSenders, ['owner@company.local'])
+    page.editRule('trustedSenders', '*.company.local')
+    assert.equal(page.store.getSnapshot().invalid, true)
+  } finally { await page.dispose() }
+})

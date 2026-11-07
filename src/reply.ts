@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Deterministic final notification text, frozen before SMTP submission. */
-import { taskWorkspace } from './workspace.ts'
 import type { TaskRecord } from './types.ts'
 
 /**
@@ -10,7 +9,7 @@ import type { TaskRecord } from './types.ts'
  * @returns the complete notification body, with an explicit notice if shortened.
  */
 export function replyText(task: TaskRecord, maxBytes: number): string {
-  const text = `Task: ${task.id}\nStatus: ${task.state}\nSession: ${task.sessionId}\nWorking directory: ${taskWorkspace(task)}`
+  const text = `Task: ${task.id}\nStatus: ${task.state}\nSession: ${task.sessionId}\nWorking directory: ${task.workspacePath ?? task.rule.task.workspacePath ?? "(not set)"}`
     + (task.reason ? `\nReason: ${task.reason}` : '')
     + `\n\nSummary:\n${task.summary}\n\nAgent last output:\n${task.lastOutput || 'No text output was recorded.'}`
   const bytes = Buffer.from(text)

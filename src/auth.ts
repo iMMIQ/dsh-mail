@@ -10,6 +10,7 @@ import { MailError, type Mail } from './types.ts'
 export async function verifySender(raw: Buffer, mail: Mail, policy: SenderPolicy, signal: AbortSignal, timeoutMs: number): Promise<void> {
   signal.throwIfAborted()
   if (mail.headers.filter(h => h.key === 'from').length !== 1) throw new MailError('invalid-from')
+  if (policy.evidence === 'local-signature' && policy.trustedSenders?.some(address => address.toLowerCase() === mail.from)) return
   const domain = domainToASCII(mail.from.slice(mail.from.lastIndexOf('@') + 1)).toLowerCase()
   if (policy.evidence === 'trusted-mta') {
     for (const header of mail.headers.filter(h => h.key === 'authentication-results')) {

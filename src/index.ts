@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-/** Cordis bundle entry: persistent mail-triggered Workspace Sessions and result replies. */
+/** Cordis bundle entry: persistent mail conversations and notifications for root DSH Sessions. */
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { AsyncDisposableStack } from '@whatwg-node/disposablestack'
 import { open } from 'node:fs/promises'
@@ -17,6 +17,7 @@ import { DomainMailStore, Spool } from './store.ts'
 import { MailRuntime } from './runtime.ts'
 import { ImapReceiver, smtpSender } from './transports.ts'
 import { MailError } from './types.ts'
+import { SessionNotifications } from './notifications.ts'
 import { canonicalWorkspace } from './workspace.ts'
 import type {} from '@deepseek-ai/dsh-commands'
 
@@ -104,6 +105,8 @@ export class MailAutomation extends TypertRemoteService {
   private reconfigure(): Promise<void> {
     this.phase = 'changing'
     this.changes = this.changes.then(async () => {
+      const requested = readSettings(this.config)
+      if (!requested.enabled || !requested.notifications.enabled) await this.runtime?.pauseNotifications()
       await this.stop()
       if (this.shutdown.signal.aborted) return
       const snapshot = readSettings(this.config)
@@ -154,6 +157,11 @@ export class MailAutomation extends TypertRemoteService {
     resources.defer(() => ownedRuntime.close())
     await runtime.initialize()
     const active = runtime
+    if (config.notifications.enabled) {
+      const notifications = new SessionNotifications(ctx, active)
+      resources.defer(() => notifications.close())
+      await notifications.start()
+    }
     for (const account of config.accounts.filter(a => a.receive)) {
       const receiver = new ImapReceiver(account, config, active, secret)
       receivers.push(receiver)

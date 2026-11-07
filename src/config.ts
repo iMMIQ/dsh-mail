@@ -29,7 +29,7 @@ export const accountSchema = z.strictObject({
 
 /** A sender policy records which evidence the operator accepts. */
 export const senderPolicySchema = z.discriminatedUnion('evidence', [
-  z.strictObject({ evidence: z.literal('local-signature'), dnsServers: z.array(line).min(1).optional() }),
+  z.strictObject({ evidence: z.literal('local-signature'), trustedSenders: z.array(address).optional(), dnsServers: z.array(line).min(1).optional() }),
   z.strictObject({
     evidence: z.literal('trusted-mta'),
     authservIds: z.array(line).min(1),
@@ -68,6 +68,7 @@ export const Config = z.strictObject({
   senderPolicies: z.record(id, senderPolicySchema),
   templates: z.record(id, z.string().min(1)),
   rules: z.array(ruleSchema),
+  notifications: z.strictObject({ enabled: z.boolean().default(false), rule: id.optional(), receipts: z.boolean().default(true) }).prefault({}),
   runtime: z.strictObject({
     tickIntervalMs: ms.default(1_000), connectionTimeoutMs: ms.default(30_000),
     maxConcurrentTasks: z.number().int().positive().default(2),
@@ -85,6 +86,8 @@ export const Config = z.strictObject({
     lockStaleMs: ms.min(5_000).default(60_000),
   }).prefault({}),
 }).superRefine((config, ctx) => {
+  if (config.notifications.enabled && !config.rules.length) ctx.addIssue({ code: 'custom', message: 'notification rule missing' })
+  if (config.notifications.rule && !config.rules.some(rule => rule.id === config.notifications.rule)) ctx.addIssue({ code: 'custom', message: 'notification rule not found' })
   for (const [name, entries] of [['accounts', config.accounts], ['rules', config.rules]] as const) {
     if (new Set(entries.map(e => e.id)).size !== entries.length) ctx.addIssue({ code: 'custom', message: `duplicate ${name} id` })
   }

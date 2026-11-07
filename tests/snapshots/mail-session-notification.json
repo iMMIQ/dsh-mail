@@ -1,0 +1,5 @@
+{
+  "subject": "[DSH] Normal DSH session",
+  "to": ["owner@example.com"],
+  "body": "Task: {{taskId}}\nStatus: succeeded\nSession: external-session\nWorking directory: {{workspace}}\n\nSummary:\nDSH turn completed.\n\nAgent last output:\nRemembered amber."
+}

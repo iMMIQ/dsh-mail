@@ -130,6 +130,7 @@ export function MailPage(props: PageProps) {
             <div className="mail-grid">{ruleField('subjectContains', 'subjectContains', rule.match.subjectContains ?? '')}{ruleField('bodyContains', 'bodyContains', rule.match.bodyContains ?? '')}</div>
             {options('policy', rule.authorization.policy, Object.keys(draft.senderPolicies).map(id => ({ id, label: id })), text => props.editRule('policy', text))}
             {options('verification', policy?.evidence ?? 'local-signature', [{ id: 'local-signature', label: t('signature') }, { id: 'trusted-mta', label: t('trustedMta') }], text => props.editRule('evidence', text))}
+            {policy?.evidence === 'local-signature' && ruleField('trustedSenders', 'trustedSenders', policy.trustedSenders?.join(', ') ?? '', false, t('trustedSendersHint'))}
             {policy?.evidence === 'trusted-mta' && <>{ruleField('authservIds', 'authservIds', policy.authservIds.join(', '))}<p className="mail-hint">{t('trustedHint')}</p></>}
             <div className="mail-grid">{ruleField('agentPreset', 'agentPreset', rule.task.agentPreset ?? '', false, `${t('agentPresetHint')}${state.status?.defaultAgentPreset ? ` (${state.status.defaultAgentPreset})` : ''}`)}{ruleField('permissionPreset', 'permissionPreset', rule.task.permissionPreset)}
               {ruleField('timeoutMs', 'timeoutMs', rule.task.timeoutMs, true)}{ruleField('maxSteps', 'maxSteps', rule.task.maxSteps, true)}</div>
@@ -138,11 +139,16 @@ export function MailPage(props: PageProps) {
           </> : <p className="mail-hint">{t('senderFirst')}</p>}
         </div></details>
       </section>
+      <section className="mail-section" aria-label={t('notificationsTitle')}>
+        <div className="mail-row"><h3>{t('notificationsTitle')}</h3><Switch label={t('notificationsTitle')} checked={draft?.notifications.enabled ?? false} disabled={disabled || !draft?.rules.length} onChange={props.setNotifications} /></div>
+        <p className="mail-hint">{t('notificationsHint')}</p>
+        {draft?.notifications.enabled && <p className="mail-hint">{t('replyDestination')} <strong>{(draft.rules.find(rule => rule.id === draft.notifications.rule) ?? draft.rules[0])?.reply.to}</strong></p>}
+      </section>
       <section className="mail-section" aria-label={t('useTitle')}>
         <header className="mail-section-heading"><span className="mail-number" aria-hidden="true">3</span><div><h3>{t('useTitle')}</h3><p className="mail-hint">{t('useHint')}</p></div></header>
         <dl className="mail-addresses"><dt>{t('exampleTo')}</dt><dd>{(rule?.match.to ?? account?.address) || t('exampleMailbox')}</dd><dt>{t('exampleSubjectLabel')}</dt><dd>{subject}</dd></dl>
         <div className="mail-example"><div className="mail-row"><span>{t('exampleBodyLabel')}</span><Button size="sm" onClick={copyBody}>{t(copy?.body === body && copy.ok ? 'copied' : 'copyBody')}</Button></div><pre tabIndex={0}>{body}</pre>{copy?.body === body && !copy.ok && <p className="mail-hint" role="status">{t('copyFailed')}</p>}</div>
-        <p className="mail-hint">{t('workspaceHint')}</p>
+        <p className="mail-hint">{t('workspaceHint')}</p><p className="mail-hint">{t('conversationHint')}</p>
       </section>
       <details className="mail-more"><summary>{t('manageOptions')}</summary><div className="mail-stack">
         <div className="mail-row"><Button size="sm" disabled={disabled} onClick={props.addAccount}>{t('addAccount')}</Button><Button size="sm" disabled={disabled || !account} onClick={props.removeAccount}>{t('removeAccount')}</Button></div>

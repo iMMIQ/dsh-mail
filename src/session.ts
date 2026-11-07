@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Ordinary Workspace-backed DSH Sessions with a scope-local result tool. */
 import type { Context } from '@deepseek-ai/cordis'
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { createUserMessage, type MessageId } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-permission-presets'
-import type {} from '@deepseek-ai/dsh-session-persistence'
+import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { Rule } from './config.ts'
@@ -31,31 +31,52 @@ export class DshExecutor implements TaskExecutor {
     this.ctx.permissionPresets.resolve(rule.task.permissionPreset)
     await this.ctx.agentPresets.resolve(rule.task.agentPreset)
   }
-  /** Settle a turn from its durable ending, optional business result and last Agent text. */
+  /** Wait in the durable mail queue while another entry point is driving this Session. */
+  ready(task: TaskRecord): boolean {
+    const agent = this.ctx.agents.get(brandString<SessionId>(task.sessionId))
+    return !agent || agent.status === 'idle' && !agent.inbox.nextTurn.length && !agent.inbox.nextStep.length
+  }
+  /** Execute one identified follow-up, preserving persisted settings and borrowed Agent ownership. */
   async execute(task: TaskRecord, signal: AbortSignal): Promise<ExecutionResult> {
     signal.throwIfAborted()
     const sessionId = brandString<SessionId>(task.sessionId)
-    if (await this.ctx.sessionPersistence.stat(sessionId)) throw new MailError('session-already-exists-review-required')
-    const preset = await this.ctx.agentPresets.resolve(task.rule.task.agentPreset)
-    await using presetScope = await this.ctx.agentPresets.acquireScope(preset.id)
-    void presetScope
+    const messageId = brandString<MessageId>(task.messageId)
     const selectedWorkspace = taskWorkspace(task)
-    const workspace = await this.ctx.workspaceRegistry.create(selectedWorkspace)
-    if (workspace.path !== selectedWorkspace) throw new MailError('workspace-changed')
+    const stored = await this.ctx.sessionPersistence.stat(sessionId)
+    if (task.continuation && !stored) throw new MailError('session-missing-review-required')
+    if (!task.continuation && stored) throw new MailError('session-already-exists-review-required')
+    if (stored && stored.header.cwd !== selectedWorkspace) throw new MailError('workspace-changed')
+    let storedPreset = stored?.header.agentPreset
+    if (stored) {
+      await using reader = await this.ctx.sessionPersistence.open(sessionId, 'read')
+      const { events } = await reader.read()
+      storedPreset = events.reduce(agentPresetProjectionDefinition.apply, agentPresetProjectionDefinition.init(reader.header)) ?? undefined
+      if (events.some(event => event.type === 'user/message' && event.data.id === messageId
+        || event.type === 'agent/inbox/spliced' && event.data.inserted.some(message => message.id === messageId))) throw new MailError('message-already-submitted-review-required')
+    }
+    let agent: Agent | undefined = this.ctx.agents.get(sessionId)
+    if (agent && !this.ready(task)) throw new MailError('session-busy', true)
     let handle: AgentHandle | undefined
+    let presetScope: AsyncDisposable | undefined
+    let off: (() => void) | undefined
     let candidate: TaskResult | undefined
     let ending: TurnEndReason['kind'] | undefined
     let lastOutput = ''
     let finalText = ''
     let steps = 0
-    const abort = (): void => handle?.agent.cancel({ kind: 'user' })
+    let entered = false
+    const done = Promise.withResolvers<void>()
+    const abort = (): void => {
+      if (entered) agent?.cancel({ kind: 'user' })
+      else agent?.inbox.remove(messageId)
+      done.resolve()
+    }
     try {
-      signal.throwIfAborted()
-      handle = await this.ctx.agents.create({ sessionId, signal,
-        meta: { cwd: workspace.path, agentPreset: preset.id },
-        agentOptions: task.rule.task.model ? { provider: task.rule.task.model.provider, model: task.rule.task.model.model,
-          ...(task.rule.task.model.maxTokens === undefined ? {} : { maxTokens: task.rule.task.model.maxTokens }) } : this.ctx.agentDefaultModel.currentSelection(),
-        setup: async (agentCtx, agent) => {
+      if (!agent) {
+        const preset = await this.ctx.agentPresets.resolve(storedPreset ?? task.rule.task.agentPreset)
+        presetScope = await this.ctx.agentPresets.acquireScope(preset.id)
+        const setup = async (agentCtx: Context, current: Agent): Promise<void> => {
+          if (current.inbox.nextTurn.length || current.inbox.nextStep.length) throw new MailError('session-has-pending-input-review-required')
           await this.ctx.agentPresets.mount(agentCtx, preset.id)
           agentCtx.tools.register(defineTool({
             name: 'mail_task_result', description: 'Optionally record a business status and concise reply summary. The host also emails the final Agent text automatically. Does not send email. Call at most once after finishing the work.',
@@ -63,35 +84,50 @@ export class DshExecutor implements TaskExecutor {
             output: { schema: { type: 'object', properties: { recorded: { type: 'boolean', required: true } }, additionalProperties: false },
               render: () => [{ type: 'text', text: 'Mail task result recorded. The host sends the notification after this turn ends.' }] },
             async execute(args, exec) {
-              if (exec.agent !== agent) throw new MailError('result-session-mismatch')
+              if (exec.agent !== current || !entered) throw new MailError('result-session-mismatch')
               if (candidate) throw new MailError('result-already-recorded')
               candidate = resultSchema.parse(args)
               return { recorded: true }
             },
             presentCall: args => ({ card: 'generic', title: 'Record mail task result', kind: 'other', rawInput: args }),
           }))
-          agentCtx.on('session/event', (session, event) => {
-            if (session.id !== sessionId) return
-            if (event.type === 'step/start' && ++steps > task.rule.task.maxSteps) agent.cancel({ kind: 'user' })
-            if (event.type === 'assistant/message') {
-              const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
-              if (text) lastOutput = text
-              finalText = event.data.message.content.some(block => block.type === 'tool-call') ? '' : text
-            }
-            if (event.type === 'turn/end') ending = event.data.reason.kind
-          })
-        },
+        }
+        const agentOptions = task.rule.task.model ? { ...task.rule.task.model } : this.ctx.agentDefaultModel.currentSelection()
+        if (stored) {
+          try { handle = await this.ctx.agents.resume({ resumeSessionId: sessionId, signal, agentOptions, setup }) }
+          catch (error) { if (error instanceof SessionAlreadyOwnedError) throw new MailError('session-busy', true, { cause: error }); throw error }
+        }
+        else {
+          const workspace = await this.ctx.workspaceRegistry.create(selectedWorkspace)
+          if (workspace.path !== selectedWorkspace) throw new MailError('workspace-changed')
+          handle = await this.ctx.agents.create({ sessionId, signal, meta: { cwd: workspace.path, agentPreset: preset.id }, agentOptions, setup })
+          await workspace.attachSession(sessionId)
+          this.ctx.permissionPresets.set(handle.agent.session, task.rule.task.permissionPreset)
+          this.ctx.sessionTitle.rename(handle.agent.session, task.title)
+        }
+        agent = handle.agent
+      }
+      const current = agent
+      off = this.ctx.on('session/event', (session, event) => {
+        if (session.id !== sessionId) return
+        if (event.type === 'user/message' && event.data.id === messageId) entered = true
+        if (!entered) return
+        if (event.type === 'step/start' && ++steps > task.rule.task.maxSteps) current.cancel({ kind: 'user' })
+        if (event.type === 'assistant/message') {
+          const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
+          if (text) lastOutput = text
+          finalText = event.data.message.content.some(block => block.type === 'tool-call') ? '' : text
+        }
+        if (event.type === 'turn/end') { ending = event.data.reason.kind; entered = false; done.resolve() }
       })
       signal.addEventListener('abort', abort, { once: true })
       signal.throwIfAborted()
-      await workspace.attachSession(sessionId)
-      this.ctx.permissionPresets.set(handle.agent.session, task.rule.task.permissionPreset)
-      this.ctx.sessionTitle.rename(handle.agent.session, task.title)
       const message = createUserMessage({ content: [{ type: 'text', text: task.prompt }],
         source: { kind: 'dsh-mail', taskId: task.id, mailId: task.mailId, ruleId: task.rule.id } })
-      handle.agent.followup(Object.freeze({ ...message, id: brandString<MessageId>(task.messageId) }))
-      await handle.agent.whenIdle()
-      if (!await this.ctx.sessions.flush(handle.agent.session)) throw new MailError('session-persistence-unavailable')
+      current.followup(Object.freeze({ ...message, id: messageId }))
+      await done.promise
+      if (signal.aborted && handle) await current.whenIdle()
+      if (!await this.ctx.sessions.flush(current.session)) throw new MailError('session-persistence-unavailable')
       if (signal.aborted || ending === 'aborted' || steps > task.rule.task.maxSteps) return { state: 'cancelled', summary: 'Task stopped before completion.', reason: steps > task.rule.task.maxSteps ? 'step-budget-exhausted' : 'cancelled', lastOutput }
       if (ending === 'error') return { state: 'failed', summary: 'Agent execution failed. Inspect the DSH session for details.', reason: 'agent-execution-error', lastOutput }
       if (ending !== 'completed') return { state: 'needs_attention', summary: 'The Agent stopped before normal completion. Inspect the DSH session.', reason: `turn-${ending ?? 'missing'}`, lastOutput }
@@ -100,7 +136,8 @@ export class DshExecutor implements TaskExecutor {
       return { state: 'needs_attention', summary: 'No final text response or structured result was recorded. Inspect the DSH session.', reason: 'missing-completed-result', lastOutput }
     } finally {
       signal.removeEventListener('abort', abort)
-      await handle?.dispose()
+      off?.()
+      try { await handle?.dispose() } finally { await presetScope?.[Symbol.asyncDispose]() }
     }
   }
 }

@@ -38,6 +38,7 @@ const schema = Schema.object({
   templates: Schema.dict(Schema.string()).default({}).volatile(),
   rules: Schema.array(Schema.any<MailSettings['rules'][number]>()).default([]).volatile(),
   runtime: Schema.any<MailSettings['runtime']>().default({}).volatile(),
+  notifications: Schema.any<MailSettings['notifications']>().default({}).volatile(),
 })
 const standard = schema['~standard']
 // Keep serializable Schemastery metadata for the form, and full Zod validation on Host writes.

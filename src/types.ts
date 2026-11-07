@@ -24,6 +24,7 @@ export interface Mail {
   subject: string
   body: string
   messageId: string | null
+  inReplyTo?: string
   references: string[]
   headers: { key: string; line: string }[]
   attachments: { name: string; contentType: string; content: Buffer }[]
@@ -56,6 +57,13 @@ export const inboxSchema = z.strictObject({
 /** Stored ingress record; content lives in the owner-only spool. */
 export type InboxRecord = z.infer<typeof inboxSchema>
 
+/** One separately submitted mail, including uncertainty after SMTP DATA. */
+const outboxSchema = z.strictObject({
+  state: z.enum(['none', 'pending', 'sending', 'accepted', 'failed', 'unknown']),
+  messageId: z.string(), attempts: z.number().int(), nextAt: z.number(),
+  subject: z.string(), text: z.string(), reason: z.string(),
+})
+
 /** Atomically stores execution settlement and the corresponding outbox entry. */
 export const taskSchema = z.strictObject({
   id: z.string().transform(v => brandString<TaskId>(v)), mailId: z.string().transform(v => brandString<MailId>(v)),
@@ -66,13 +74,15 @@ export const taskSchema = z.strictObject({
   state: z.enum(['queued', 'starting', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'needs_attention']),
   summary: z.string(), reason: z.string(), attempt: z.number().int(),
   lastOutput: z.string().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  continuation: z.boolean().optional(),
+  origin: z.literal('session').optional(),
+  inputHash: z.string().optional(),
+  turn: z.number().int().nonnegative().optional(),
+  receipt: outboxSchema.optional(),
   authorization: z.strictObject({ sender: z.string(), policy: senderPolicySchema }),
   operations: z.array(z.strictObject({ kind: z.string(), at: z.number() })),
-  outbox: z.strictObject({
-    state: z.enum(['none', 'pending', 'sending', 'accepted', 'failed', 'unknown']),
-    messageId: z.string(), attempts: z.number().int(), nextAt: z.number(),
-    subject: z.string(), text: z.string(), reason: z.string(),
-  }),
+  outbox: outboxSchema,
 })
 /** Complete execution and notification state. */
 export type TaskRecord = z.infer<typeof taskSchema>
@@ -96,9 +106,11 @@ export interface MailStore {
   close(): Promise<void>
 }
 
-/** DSH execution adapter. It owns all AgentHandles until settlement. */
+/** DSH execution adapter. Created handles are owned; existing live Agents are borrowed. */
 export interface TaskExecutor {
   validate(rule: z.infer<typeof ruleSchema>): Promise<void>
+  /** Whether the Session can accept this mail turn without taking over another writer. */
+  ready?(task: TaskRecord): boolean
   execute(task: TaskRecord, signal: AbortSignal): Promise<ExecutionResult>
 }
 

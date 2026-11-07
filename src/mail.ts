@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** Bounded MIME parsing and deterministic task routing. */
 import { simpleParser } from 'mailparser'
+import EmailReplyParser from 'email-reply-parser'
 import type { Config, Rule } from './config.ts'
 import { MailError, type Mail } from './types.ts'
 
@@ -8,6 +9,7 @@ import { MailError, type Mail } from './types.ts'
 export async function parseMail(raw: Buffer, limits: Config['runtime']): Promise<Mail> {
   if (raw.length > limits.maxMessageBytes) throw new MailError('message-too-large')
   const parsed = await simpleParser(raw, { skipHtmlToText: false, skipTextToHtml: true, skipImageLinks: true })
+  if (['message-id', 'in-reply-to', 'references'].some(key => (parsed.headerLines ?? []).filter(header => header.key === key).length > 1)) throw new MailError('ambiguous-routing-headers')
   const from = parsed.from?.value
   if (from?.length !== 1 || !from[0]?.address) throw new MailError('invalid-from')
   const attachments = parsed.attachments.map(a => ({ name: a.filename ?? 'attachment', contentType: a.contentType, content: a.content }))
@@ -16,7 +18,18 @@ export async function parseMail(raw: Buffer, limits: Config['runtime']): Promise
   const references = typeof parsed.references === 'string' ? [parsed.references] : parsed.references ?? []
   if (parsed.inReplyTo) references.push(parsed.inReplyTo)
   return { from: from[0].address.toLowerCase(), to, subject: parsed.subject ?? '', body: parsed.text ?? '',
+    ...(parsed.inReplyTo ? { inReplyTo: parsed.inReplyTo } : {}),
     messageId: parsed.messageId ?? null, references: [...new Set(references)], headers: [...parsed.headerLines ?? []], attachments }
+}
+
+/** Extract the newly written top-level reply; quoted history stays in the raw spool.
+ * @param mail Parsed reply, after sender verification and thread resolution.
+ * @returns The message with only its new text, or a visible rejection for an empty reply.
+ */
+export function replyInput(mail: Mail): Mail {
+  const body = new EmailReplyParser().parseReply(mail.body).trim()
+  if (!body) throw new MailError('reply-has-no-new-text')
+  return { ...mail, body }
 }
 
 /** System messages are never eligible for task execution, even from allowlisted senders. */

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { dump } from 'js-yaml'
@@ -15,7 +15,7 @@ import { mailServers, waitFor } from './network.ts'
 
 const host = z.object({ version: z.string(), dependencies: z.record(z.string(), z.string()) }).parse(JSON.parse(await readFile(resolve('node_modules/@deepseek-ai/dsh/package.json'), 'utf8')))
 
-async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure'): Promise<void> {
+async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result' | 'model-error' | 'reconfigure' | 'conversation' | 'external'): Promise<void> {
   const success = scenario === 'success' || scenario === 'reconfigure'
   await using resources = new AsyncDisposableStack()
   const root = await mkdtemp(join(tmpdir(), 'dsh-mail-profile-'))
@@ -50,6 +50,10 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
   const config = Config.parse({ ...original, rules: [{ ...original.rules[0]!, task: emailTask }] })
   const emailDirectory = join(root, 'email-workspace')
   await mkdir(emailDirectory)
+  if (scenario === 'conversation' || scenario === 'external') {
+    config.notifications = { enabled: scenario === 'external', receipts: true }
+    config.senderPolicies.trusted = { evidence: 'local-signature', trustedSenders: ['owner@example.com'] }
+  }
   config.runtime.tickIntervalMs = 20
   Object.assign(config.accounts[0]!.receive!, { host: '127.0.0.1', port: servers.imapPort, ca: servers.ca, rescanIntervalMs: 50, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
   Object.assign(config.accounts[0]!.send!, { host: '127.0.0.1', port: servers.smtpPort, ca: servers.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
@@ -66,24 +70,109 @@ async function profileScenario(scenario: 'success' | 'text-only' | 'empty-result
     'agent-preset-registry': { default: 'mail-reader' }, 'agent-preset': { id: 'mail-reader', plugins: [] },
     'credentials-local': { path: join(root, 'credentials.yaml'), watch: false },
   }
+  if (scenario === 'external') configs['agent-preset'] = { id: 'mail-reader', plugins: [{ name: resolve('tests/fixtures/selected-mode.mjs') }] }
   const rows = names.map(name => ({ id: name, name: name === 'shell' ? resolve('tests/fixtures/denied-shell.mjs') : `@deepseek-ai/dsh-${name}`, ...(configs[name] ? { config: configs[name] } : {}) }))
+  if (scenario === 'external') rows.push({ id: 'initial-mode', name: '@deepseek-ai/dsh-agent-preset', config: { id: 'initial-mode', plugins: [] } })
   if (scenario === 'reconfigure') rows.unshift({ id: 'timer', name: '@deepseek-ai/cordis-plugin-timer' })
   const patches = [{ insert: [...rows,
-    { id: 'fixture', name: resolve('tests/fixtures/driver.mjs'), config: { root, scenario } },
+    { id: 'fixture', name: resolve('tests/fixtures/driver.mjs'), config: { root, scenario, workspace: emailDirectory } },
   ] }, { id: 'mail-automation', disabled: false, config }]
   await writeFile(join(profile, 'cordis.patch.yml'), dump(patches, { noRefs: true }))
   const node = Bun.which(process.env.DSH_TEST_NODE ?? 'node')
   if (!node) throw new Error('Install a Node.js host compatible with the selected DSH version')
-  child = spawn(node, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'mail-test'],
-    { cwd: resolve('.'), env: { ...process.env, DSH_HOME: home, MAIL_PASSWORD: 'testpass' }, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''
-  child.stdout!.on('data', chunk => { output += String(chunk) })
-  child.stderr!.on('data', chunk => { output += String(chunk) })
-  exit = new Promise<void>(resolveExit => child!.once('exit', () => { exited = true; resolveExit() }))
+  const launch = (): void => {
+    exited = false
+    output = ''
+    child = spawn(node, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'mail-test'],
+      { cwd: resolve('.'), env: { ...process.env, DSH_HOME: home, MAIL_PASSWORD: 'testpass' }, stdio: ['ignore', 'pipe', 'pipe'] })
+    child.stdout!.on('data', chunk => { output += String(chunk) })
+    child.stderr!.on('data', chunk => { output += String(chunk) })
+    exit = new Promise<void>(resolveExit => child!.once('exit', () => { exited = true; resolveExit() }))
+  }
+  launch()
   await waitFor(() => {
     if (exited) throw new Error(`dsh exited before ready:\n${output}`)
     return output.includes('DSH_MAIL_READY')
   }, () => `dsh ready; ${output}`)
+  if (scenario === 'conversation' || scenario === 'external') {
+    const send = (id: string, body: string, parent?: string): void => {
+      const raw = message(parent ? '回复：continue with a different title' : '[DSH] remember', body, parent ? [`In-Reply-To: ${parent}`, `References: ${parent}`] : [])
+        .toString().replace('<fixture@example.com>', `<${id}@example.com>`)
+      servers.imap.appendMessage('INBOX', [], new Date(), raw)
+    }
+    const control = async (id: string, text: string): Promise<void> => {
+      await writeFile(join(root, 'control.tmp'), JSON.stringify({ id, text }))
+      await rename(join(root, 'control.tmp'), join(root, 'control.json'))
+    }
+    const results = async () => {
+      const mails = await Promise.all(servers.received.map(raw => parseMail(raw, config.runtime)))
+      return mails.filter(mail => mail.body.includes('Status:'))
+    }
+    const waitResults = async (count: number) => waitFor(async () => { if (exited) throw new Error(`DSH exited before the result: ${output}`); return (await results()).length >= count }, () => `waiting for ${count} turn emails; ${output}`)
+    if (scenario === 'external') {
+      await control('initial', 'Remember amber.')
+    } else send('initial', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nRemember amber.`)
+    await waitResults(1)
+    const first = (await results())[0]!
+    assert.match(first.body, /Remembered amber/)
+    assert.ok(first.messageId)
+    const sessionId = /Session: ([^\n]+)/.exec(first.body)![1]!.trim()
+    if (scenario === 'external') {
+      assert.equal(sessionId, 'external-session')
+      const expected: unknown = JSON.parse(await readFile(resolve('tests/snapshots/mail-session-notification.json'), 'utf8'))
+      assert.deepEqual({ subject: first.subject, to: first.to, body: first.body.trim().replace(/Task: [a-f0-9]{64}/, 'Task: {{taskId}}').replace(emailDirectory, '{{workspace}}') }, expected)
+    }
+    send('hold', 'HOLD: report the remembered color.\n\nOn Monday, DSH wrote:\n> OLD QUOTED INSTRUCTION', first.messageId)
+    await waitFor(async () => { try { await readFile(join(root, 'entered')); return true } catch (error) { if (z.object({ code: z.string() }).parse(error).code !== 'ENOENT') throw error; return false } }, () => `continuation entered; ${output}`)
+    send('queued', 'Report the remembered color again.', first.messageId)
+    const queuedRaw = message('Re: [DSH] duplicate', 'Report the remembered color again.', [`In-Reply-To: ${first.messageId}`]).toString().replace('<fixture@example.com>', '<queued@example.com>')
+    // Same Message-ID with different content is quarantined, not executed twice.
+    servers.imap.appendMessage('INBOX', [], new Date(), queuedRaw)
+    await waitFor(async () => {
+      const current = z.object({ tasks: z.array(z.object({ state: z.string() })) }).parse(JSON.parse(await readFile(join(root, 'status.json'), 'utf8')))
+      return current.tasks.some(task => task.state === 'queued')
+    }, () => `second follow-up queued; ${output}`)
+    await writeFile(join(root, 'release'), 'continue')
+    await waitResults(3)
+    assert.ok((await results()).every(mail => mail.body.includes(`Session: ${sessionId}`)))
+    assert.match((await results())[1]!.body, /Remembered color: amber/)
+    assert.match((await results())[2]!.body, /Remembered color: amber/)
+    if (scenario === 'external') {
+      await control('next-ui-turn', 'Report the remembered color from the DSH interface.')
+      await waitResults(4)
+    }
+    const beforeRestart = (await results()).length
+    child!.kill('SIGTERM')
+    await waitFor(() => exited, () => 'profile stopped before restart')
+    await exit
+    launch()
+    await waitFor(() => output.includes('DSH_MAIL_READY'), () => `profile restarted; ${output}`)
+    send('after-restart', 'Report the remembered color after restart.', first.messageId)
+    await waitResults(beforeRestart + 1)
+    const final = (await results()).at(-1)!
+    assert.match(final.body, /Remembered color: amber/)
+    assert.ok(final.body.includes(`Session: ${sessionId}`))
+    const requests = z.array(z.object({ texts: z.array(z.string()), tools: z.array(z.string()) })).parse(JSON.parse(await readFile(join(root, 'requests.json'), 'utf8')))
+    assert.ok(requests.at(-1)!.texts.some(text => text.includes('Remember amber')))
+    if (scenario === 'external') assert.ok(requests.at(-1)!.tools.includes('selected_mode_tool'))
+    assert.ok(requests.every(request => request.texts.every(text => !text.includes('OLD QUOTED INSTRUCTION'))))
+    const logs = await readdir(join(root, 'sessions'), { recursive: true })
+    const sessionFile = logs.find(name => /(?:^|[/\\])session\.v\d+\.jsonl$/.test(name))!
+    const events = z.array(z.object({ type: z.string(), data: z.object({ preset: z.string().optional(), source: z.object({ kind: z.string() }).optional() }).passthrough().optional() })).parse((await readFile(join(root, 'sessions', sessionFile), 'utf8')).trim().split('\n').map(line => JSON.parse(line)))
+    const permissions = events.filter(event => event.type === 'permission/preset').map(event => event.data?.preset)
+    const expectedPermission = scenario === 'external' ? 'restricted' : 'danger-full-access'
+    assert.equal(permissions.at(-1), expectedPermission)
+    const firstUser = events.findIndex(event => event.type === 'user/message')
+    assert.ok(events.slice(firstUser).filter(event => event.type === 'permission/preset').every(event => event.data?.preset === expectedPermission))
+    assert.equal(events.filter(event => event.type === 'user/message' && ['dsh-mail', 'user'].includes(event.data?.source?.kind ?? '')).length, beforeRestart + 1)
+    assert.equal((await results()).length, beforeRestart + 1)
+    const received = await Promise.all(servers.received.map(raw => parseMail(raw, config.runtime)))
+    const receipts = received.filter(mail => mail.body.includes('Received and queued.'))
+    assert.equal(receipts.length, beforeRestart + 1 - (scenario === 'external' ? 2 : 0))
+    assert.ok(received.every(mail => mail.headers.some(header => header.key === 'reply-to' && header.line.includes('bot@example.com'))))
+    return
+  }
   servers.imap.appendMessage('INBOX', [], new Date(), message('[DSH] create evidence', `---\nworkspace: ${JSON.stringify(emailDirectory)}\n---\nWrite the evidence file, then report success.`).toString())
   await waitFor(() => servers.received.length === 1, () => `result mail; ${output}`)
   const response = await parseMail(servers.received[0]!, config.runtime)
@@ -142,3 +231,7 @@ test('a final Agent text response is automatically emailed without using the res
 test('a real DSH Agent becoming idle without text or a result is reported as needs_attention', () => profileScenario('empty-result'), 60_000)
 test('a failed real Agent turn emails failure and the last text while excluding reasoning', () => profileScenario('model-error'), 60_000)
 test('live configuration stops and restarts the mail runtime without replaying old mail or retaining the old lock', () => profileScenario('reconfigure'), 60_000)
+
+
+test('email replies preserve one real DSH conversation through queueing and a process restart', () => profileScenario('conversation'), 90_000)
+test('a non-mail DSH session notifies, accepts replies and preserves its original permissions across restart', () => profileScenario('external'), 90_000)
