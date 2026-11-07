@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
+import { isTask } from '../src/types.ts'
+import { mailIdentity } from '../src/identity.ts'
 import { readFile, writeFile, mkdir, mkdtemp, rm, symlink, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -66,7 +68,7 @@ test('concurrent duplicate admission creates one task and one reply', async () =
   assert.equal(f.store.inbox().length, 1)
   assert.equal(f.executed.length, 1)
   assert.equal(f.sent.length, 1)
-  assert.equal(f.store.tasks()[0]?.outbox.state, 'accepted')
+  assert.equal(f.store.records()[0]?.outbox.state, 'accepted')
   assert.equal(f.reports.length, 0)
 })
 
@@ -120,7 +122,8 @@ test('unknown SMTP acknowledgement is persisted and never automatically retried'
   await f.runtime.admit(f.delivery()); await f.finish()
   for (let i = 0; i < 3; i++) { f.advance(); await f.runtime.tick() }
   assert.equal(sends, 1)
-  const task = f.store.tasks()[0]!
+  const task = f.store.records()[0]!
+  assert.ok(isTask(task))
   assert.equal(task.state, 'succeeded'); assert.equal(task.outbox.state, 'unknown')
   await assert.rejects(f.runtime.retryNotification(task.id), /not-retryable/)
   await f.runtime.retryNotification(task.id, true)
@@ -140,33 +143,33 @@ test('temporary SMTP rejection retries only frozen notification content', async 
   assert.equal(content.length, 2); assert.equal(content[0], content[1]); assert.equal(f.executed.length, 1)
 })
 
-for (const interrupted of ['starting', 'running'] as const) {
-  test(`process restart preserves accepted tasks and quarantines ${interrupted} side effects`, async () => {
-    await using t = new AsyncDisposableStack()
-    const f = await fixture(t)
-    await f.runtime.admit(f.delivery()); await f.finish()
-    const task = f.store.tasks()[0]!
-    await f.store.putTask({ ...task, state: interrupted, outbox: { ...task.outbox, state: 'none' } })
-    await f.runtime.close()
-    const restarted = new MailRuntime(f.config, f.spool, f.deps)
-    f.cleanup.defer(() => restarted.close())
-    await restarted.initialize(); await restarted.tick()
-    assert.equal(f.store.tasks()[0]?.state, 'needs_attention')
-    assert.equal(f.executed.length, 1)
-  })
-}
+test('process restart preserves accepted tasks and quarantines running side effects', async () => {
+  await using t = new AsyncDisposableStack()
+  const f = await fixture(t)
+  await f.runtime.admit(f.delivery()); await f.finish()
+  const task = f.store.records()[0]!
+  assert.ok(isTask(task))
+  await f.store.putRecord({ ...task, state: 'running', outbox: { ...task.outbox, state: 'none' } })
+  await f.runtime.close()
+  const restarted = new MailRuntime(f.config, f.spool, f.deps)
+  f.cleanup.defer(() => restarted.close())
+  await restarted.initialize(); await restarted.tick()
+  assert.equal(f.store.records()[0]?.state, 'needs_attention')
+  assert.equal(f.executed.length, 1)
+})
 
 test('restart during sending produces unknown without resubmitting', async () => {
   await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const task = f.store.tasks()[0]!
-  await f.store.putTask({ ...task, outbox: { ...task.outbox, state: 'sending' } })
+  const task = f.store.records()[0]!
+  assert.ok(isTask(task))
+  await f.store.putRecord({ ...task, outbox: { ...task.outbox, state: 'sending' } })
   await f.runtime.close()
   const restarted = new MailRuntime(f.config, f.spool, f.deps)
   f.cleanup.defer(() => restarted.close())
   await restarted.initialize(); await restarted.tick()
-  assert.equal(f.store.tasks()[0]?.outbox.state, 'unknown'); assert.equal(f.sent.length, 1)
+  assert.equal(f.store.records()[0]?.outbox.state, 'unknown'); assert.equal(f.sent.length, 1)
 })
 
 test('workspace serialization is synchronized by an explicit execution barrier', async () => {
@@ -198,7 +201,7 @@ test('cancellation drains an active executor before close completes', async () =
   } } })
   await f.runtime.admit(f.delivery()); await f.runtime.tick(); await entered.promise
   await f.runtime.close()
-  assert.equal(drained, true); assert.equal(f.store.tasks()[0]?.state, 'cancelled')
+  assert.equal(drained, true); assert.equal(f.store.records()[0]?.state, 'cancelled')
 })
 
 test('spool refuses a second owner and detects corrupted stored bytes', async () => {
@@ -216,12 +219,12 @@ test('persistent SQLite state reopens with the same deduplication and outbox rec
   await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const before = f.store.tasks()
+  const before = f.store.records()
   assert.equal((await readFile(join(f.directory, 'state.sqlite'))).subarray(0, 6).toString(), 'SQLite')
   await f.store.close()
   const reopened = await DomainMailStore.open(f.facility)
   f.cleanup.defer(() => reopened.close())
-  assert.deepEqual(reopened.tasks(), before)
+  assert.deepEqual(reopened.records(), before)
   assert.equal(reopened.inbox().length, 1)
 })
 
@@ -230,7 +233,7 @@ test('dry-run uses the production decision without writing inbox, spool, tasks o
   const f = await fixture(t)
   const result = await f.runtime.preview(message(), 'work')
   assert.ok('state' in result && result.state === 'matched')
-  assert.equal(f.store.inbox().length, 0); assert.equal(f.store.tasks().length, 0)
+  assert.equal(f.store.inbox().length, 0); assert.equal(f.store.records().length, 0)
   assert.equal(f.executed.length, 0); assert.equal(f.sent.length, 0)
 })
 
@@ -245,7 +248,7 @@ test('held replies are re-verified before an operator releases them as independe
   await f.runtime.releaseReply(record.id)
   await f.finish()
   assert.equal(checks, 2); assert.equal(f.executed.length, 1)
-  assert.equal(f.store.tasks()[0]?.operations[0]?.kind, 'operator-released-reply')
+  assert.equal(f.store.records()[0]?.operations[0]?.kind, 'operator-released-reply')
   await assert.rejects(f.runtime.releaseReply(record.id), /not-held/)
 })
 
@@ -253,12 +256,14 @@ test('operator task retry creates a new Session identity and retains the old fai
   await using t = new AsyncDisposableStack()
   const f = await fixture(t, { executor: { async validate() {}, async execute() { return { state: 'failed', summary: 'Task failed.', reason: 'business-failure' } } } })
   await f.runtime.admit(f.delivery()); await f.finish()
-  const first = f.store.tasks()[0]!
+  const first = f.store.records()[0]!
   await f.runtime.retryTask(first.id); await f.finish()
-  const tasks = f.store.tasks()
+  const tasks = f.store.records()
   assert.equal(tasks.length, 2); assert.equal(tasks[0]?.state, 'failed')
   assert.notEqual(tasks[0]?.sessionId, tasks[1]?.sessionId)
-  assert.equal(tasks[1]?.attempt, 2)
+  const retried = tasks[1]!
+  assert.ok(isTask(retried))
+  assert.equal(retried.attempt, 2)
 })
 
 test('timeout aborts the executor and persists timed_out with a final notification', async () => {
@@ -269,7 +274,7 @@ test('timeout aborts the executor and persists timed_out with a final notificati
   } } })
   f.config.rules[0]!.task.timeoutMs = 10
   await f.runtime.admit(f.delivery()); await f.finish()
-  assert.equal(f.store.tasks()[0]?.state, 'timed_out')
+  assert.equal(f.store.records()[0]?.state, 'timed_out')
   assert.equal(f.sent.length, 1)
 })
 
@@ -324,11 +329,12 @@ test('queued tasks retain snapshots and stop after source policy revocation', as
   const f = await fixture(t)
   f.config.runtime.maxConcurrentTasks = 1
   await f.runtime.admit(f.delivery(1)); await f.finish()
-  const old = f.store.tasks()[0]!
-  await f.store.putTask({ ...old, state: 'queued', outbox: { ...old.outbox, state: 'none' } })
+  const old = f.store.records()[0]!
+  assert.ok(isTask(old))
+  await f.store.putRecord({ ...old, state: 'queued', outbox: { ...old.outbox, state: 'none' } })
   f.config.senderPolicies.trusted = { evidence: 'local-signature' }
   await f.finish()
-  assert.equal(f.store.tasks()[0]?.state, 'needs_attention')
+  assert.equal(f.store.records()[0]?.state, 'needs_attention')
   assert.equal(f.executed.length, 1)
   assert.equal(old.authorization.policy.evidence, 'trusted-mta')
 })
@@ -351,7 +357,7 @@ test('different accounts and workspaces can execute concurrently without starvin
   await mkdir(secondRule.task.workspacePath)
   f.config.rules.push(secondRule)
   await f.runtime.admit(f.delivery(1)); await f.runtime.admit(f.delivery(2))
-  await f.runtime.admit({ ...f.delivery(1), account: 'other' })
+  await f.runtime.admit({ ...f.delivery(1), account: 'other', id: mailIdentity('other', 'INBOX', '1', 1) })
   await f.runtime.tick(); await both.promise
   assert.deepEqual([...accounts].sort(), ['other', 'work'])
   release.resolve(); await f.runtime.whenSettled(); await f.runtime.tick(); await f.runtime.whenSettled()
@@ -401,7 +407,7 @@ test('missing, malformed and invalid email directories are quarantined without c
     assert.equal(f.store.inbox().at(-1)?.reason, reason)
     assert.equal(f.store.inbox().at(-1)?.state, 'quarantined')
   }
-  assert.equal(f.store.tasks().length, 0)
+  assert.equal(f.store.records().length, 0)
   await assert.rejects(realpath(join(f.directory, 'missing')), { code: 'ENOENT' })
 })
 
@@ -415,7 +421,7 @@ test('preview resolves the email directory and exposes the effective permissions
   assert.equal(result.workspacePath, await realpath(f.directory))
   assert.equal(result.permissionPreset, 'danger-full-access')
   assert.equal(f.store.inbox().length, 0)
-  assert.equal(f.store.tasks().length, 0)
+  assert.equal(f.store.records().length, 0)
 })
 
 test.skipIf(process.platform === 'win32')('symlink aliases from email share the canonical workspace serialization key', async () => {
@@ -436,7 +442,7 @@ test.skipIf(process.platform === 'win32')('symlink aliases from email share the 
   }
   await f.runtime.tick(); await entered.promise; await f.runtime.tick()
   assert.equal(runs, 1)
-  assert.equal(f.store.tasks()[0]?.workspacePath, f.store.tasks()[1]?.workspacePath)
+  assert.equal(f.store.records()[0]?.workspacePath, f.store.records()[1]?.workspacePath)
   release.resolve(); await f.runtime.whenSettled(); await f.runtime.tick(); await f.runtime.whenSettled()
   assert.equal(runs, 2)
 })
@@ -445,12 +451,12 @@ test('fixed-directory task records without the new selected-directory field stil
   await using t = new AsyncDisposableStack()
   const f = await fixture(t)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const { workspacePath: _selected, ...legacy } = f.store.tasks()[0]!
-  await f.store.putTask(legacy)
+  const { workspacePath: _selected, ...legacy } = f.store.records()[0]!
+  await f.store.putRecord(legacy)
   await f.store.close()
   const reopened = await DomainMailStore.open(f.facility)
   f.cleanup.defer(() => reopened.close())
-  assert.equal(taskWorkspace(reopened.tasks()[0]!), f.config.rules[0]!.task.workspacePath)
+  assert.equal(taskWorkspace(reopened.records()[0]!), f.config.rules[0]!.task.workspacePath)
 })
 
 test('final notifications persist and include the Agent text independently of the summary', async () => {
@@ -459,7 +465,8 @@ test('final notifications persist and include the Agent text independently of th
     return { state: 'succeeded', summary: 'Checks completed.', reason: '', lastOutput: '分析完成：已修复两个问题，测试通过。' }
   } } })
   await f.runtime.admit(f.delivery()); await f.finish()
-  const task = f.store.tasks()[0]!
+  const task = f.store.records()[0]!
+  assert.ok(isTask(task))
   assert.equal(task.lastOutput, '分析完成：已修复两个问题，测试通过。')
   assert.match(f.sent[0]!.text, /Summary:\nChecks completed\./)
   assert.match(f.sent[0]!.text, /Agent last output:\n分析完成/)
@@ -490,7 +497,7 @@ test('long Unicode output is explicitly shortened within the configured email by
   assert.ok(Buffer.byteLength(text) <= 1_024)
   assert.match(text, /Email shortened/)
   assert.doesNotMatch(text, /\uFFFD/)
-  assert.equal(f.store.tasks()[0]?.lastOutput, output)
+  assert.equal(f.store.records()[0]?.lastOutput, output)
 })
 
 test('re-execution clears the previous Agent output before starting a new attempt', async () => {
@@ -499,16 +506,16 @@ test('re-execution clears the previous Agent output before starting a new attemp
     return { state: 'failed', summary: 'Failed.', reason: 'failed', lastOutput: 'Old attempt output.' }
   } } })
   await f.runtime.admit(f.delivery()); await f.finish()
-  await f.runtime.retryTask(f.store.tasks()[0]!.id)
-  assert.equal(f.store.tasks()[1]?.lastOutput, '')
+  await f.runtime.retryTask(f.store.records()[0]!.id)
+  assert.equal(f.store.records()[1]?.lastOutput, '')
 })
 
 test('an atomic task update failure blocks execution and reports the unavailable store', async () => {
   await using resources = new AsyncDisposableStack()
   const f = await fixture(resources)
-  f.store.updateTask = async () => { throw new Error('Fixture storage unavailable') }
+  f.store.updateRecord = async () => { throw new Error('Fixture storage unavailable') }
   await f.runtime.admit(f.delivery()); await f.finish()
-  assert.equal(f.store.tasks()[0]?.state, 'queued')
+  assert.equal(f.store.records()[0]?.state, 'queued')
   assert.equal(f.executed.length, 0)
   assert.equal(f.sent.length, 0)
   assert.deepEqual(f.reports, ['mail-runtime-blocked'])
@@ -518,9 +525,9 @@ test('an atomic task update failure blocks execution and reports the unavailable
 test('a completed execution whose settlement cannot be stored is blocked without a second settlement', async () => {
   await using resources = new AsyncDisposableStack()
   const f = await fixture(resources)
-  const update = f.store.updateTask.bind(f.store)
+  const update = f.store.updateRecord.bind(f.store)
   let settlements = 0
-  f.store.updateTask = (id, transform) => update(id, current => {
+  f.store.updateRecord = (id, transform) => update(id, current => {
     const next = transform(current)
     if (!['queued', 'starting', 'running'].includes(next.state)) {
       settlements++
@@ -531,7 +538,7 @@ test('a completed execution whose settlement cannot be stored is blocked without
   await f.runtime.admit(f.delivery()); await f.finish()
   assert.equal(f.executed.length, 1)
   assert.equal(settlements, 1)
-  assert.equal(f.store.tasks()[0]?.state, 'running')
+  assert.equal(f.store.records()[0]?.state, 'running')
   assert.equal(f.sent.length, 0)
   assert.deepEqual(f.reports, ['mail-runtime-blocked'])
   await assert.rejects(f.runtime.admit(f.delivery(2)), /blocked/)
@@ -543,9 +550,9 @@ test('shutdown drains an admitted atomic update before releasing task ownership'
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   resources.defer(() => release.resolve())
-  const update = f.store.updateTask.bind(f.store)
+  const update = f.store.updateRecord.bind(f.store)
   let first = true
-  f.store.updateTask = async (id, transform) => {
+  f.store.updateRecord = async (id, transform) => {
     if (first) { first = false; entered.resolve(); await release.promise }
     return update(id, transform)
   }
@@ -559,6 +566,6 @@ test('shutdown drains an admitted atomic update before releasing task ownership'
   release.resolve()
   await close
   assert.equal(closed, true)
-  assert.equal(f.store.tasks()[0]?.state, 'needs_attention')
+  assert.equal(f.store.records()[0]?.state, 'needs_attention')
   assert.equal(f.executed.length, 0)
 })

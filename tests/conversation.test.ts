@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
+import { isTask } from '../src/types.ts'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { configuration, fixture, message } from './helpers.ts'
@@ -33,12 +34,12 @@ test('a known thread bypasses new-task subject matching and preserves its worksp
   await using resources = new AsyncDisposableStack()
   const f = await fixture(resources)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const first = f.store.tasks()[0]!
+  const first = f.store.records()[0]!
   const raw = message('回复：changed title', 'Continue.\n\nOn Monday, DSH wrote:\n> OLD COMMAND', [`In-Reply-To: ${first.outbox.messageId}`]).toString().replace('<fixture@example.com>', '<followup@example.com>')
   await f.runtime.admit(f.delivery(2, Buffer.from(raw))); await f.finish()
   assert.equal(f.executed.length, 2)
   assert.equal(f.executed[1]!.sessionId, first.sessionId)
-  assert.equal(f.executed[1]!.continuation, true)
+  assert.equal(f.executed[1]!.mode, 'followup')
   assert.equal(f.executed[1]!.workspacePath, first.workspacePath)
   assert.doesNotMatch(f.executed[1]!.prompt, /OLD COMMAND/)
   f.config.rules[0]!.authorization.allowedSenders.push('other@example.com')
@@ -74,7 +75,8 @@ test('receipt submission cannot overwrite a concurrently completed turn', async 
   await f.runtime.whenSettled()
   sent.resolve({ state: 'accepted' })
   await tick
-  const task = f.store.tasks()[0]!
+  const task = f.store.records()[0]!
+  assert.ok(isTask(task))
   assert.equal(task.state, 'succeeded')
   assert.equal(task.receipt?.state, 'accepted')
   assert.equal(task.outbox.state, 'pending')
@@ -88,7 +90,8 @@ test('unknown receipt submission does not block the result or retry the task', a
   f.config.notifications.receipts = true
   await f.runtime.admit(f.delivery()); await f.finish()
   f.advance(); await f.runtime.tick()
-  const task = f.store.tasks()[0]!
+  const task = f.store.records()[0]!
+  assert.ok(isTask(task))
   assert.equal(task.receipt?.state, 'unknown')
   assert.equal(task.outbox.state, 'accepted')
   assert.equal(f.executed.length, 1)
@@ -99,27 +102,29 @@ test('queued follow-ups are held for review when the preceding turn was interrup
   await using resources = new AsyncDisposableStack()
   const f = await fixture(resources)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const original = f.store.tasks()[0]!
+  const original = f.store.records()[0]!
+  assert.ok(isTask(original))
   const raw = message('Re: task', 'Continue.', [`In-Reply-To: ${original.outbox.messageId}`]).toString().replace('<fixture@example.com>', '<next@example.com>')
   f.deps.executor.ready = () => false
   await f.runtime.admit(f.delivery(2, Buffer.from(raw))); await f.runtime.tick()
-  await f.store.putTask({ ...original, state: 'running' })
+  await f.store.putRecord({ ...original, state: 'running' })
   await f.runtime.initialize()
-  assert.equal(f.store.tasks()[1]!.state, 'needs_attention')
-  assert.equal(f.store.tasks()[1]!.reason, 'previous-turn-interrupted')
+  assert.equal(f.store.records()[1]!.state, 'needs_attention')
+  assert.equal(f.store.records()[1]!.reason, 'previous-turn-interrupted')
 })
 
 test('global notifications join their existing mail thread and retain its sender and routing', async () => {
   await using resources = new AsyncDisposableStack()
   const f = await fixture(resources)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const original = f.store.tasks()[0]!
+  const original = f.store.records()[0]!
+  assert.ok(isTask(original))
   f.config.notifications.enabled = true
   const input = { sessionId: brandString<SessionId>(original.sessionId), turn: 2, title: 'Continued from DSH', workspacePath: original.workspacePath!, state: 'succeeded' as const, lastOutput: 'A later DSH turn.', reason: '' }
   await f.runtime.notifySession(input)
   await f.runtime.notifySession(input)
-  assert.equal(f.store.tasks().length, 2)
-  const notice = f.store.tasks()[1]!
+  assert.equal(f.store.records().length, 2)
+  const notice = f.store.records()[1]!
   assert.equal(notice.originalMessageId, original.outbox.messageId)
   assert.equal(notice.authorization.sender, original.authorization.sender)
   assert.equal(notice.rule.reply.to, original.rule.reply.to)
@@ -130,15 +135,17 @@ test('retrying a follow-up retains its conversation and gets a fresh input ident
   await using resources = new AsyncDisposableStack()
   const f = await fixture(resources)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const root = f.store.tasks()[0]!
+  const root = f.store.records()[0]!
   const raw = message('Re: task', 'Continue.', [`In-Reply-To: ${root.outbox.messageId}`]).toString().replace('<fixture@example.com>', '<retry-followup@example.com>')
   await f.runtime.admit(f.delivery(2, Buffer.from(raw))); await f.finish()
-  const turn = f.store.tasks()[1]!
-  await f.store.putTask({ ...turn, state: 'failed' })
+  const turn = f.store.records()[1]!
+  assert.ok(isTask(turn))
+  await f.store.putRecord({ ...turn, state: 'failed' })
   await f.runtime.retryTask(turn.id)
-  const retry = f.store.tasks()[2]!
+  const retry = f.store.records()[2]!
+  assert.ok(isTask(retry))
   assert.equal(retry.sessionId, root.sessionId)
-  assert.equal(retry.continuation, true)
+  assert.equal(retry.mode, 'followup')
   assert.notEqual(retry.messageId, turn.messageId)
   assert.equal(retry.receipt, undefined)
 })
@@ -152,10 +159,10 @@ test('a Session claimed by another entry point is queued again without sending a
   } } })
   await f.runtime.admit(f.delivery())
   await f.runtime.tick(); await f.runtime.whenSettled()
-  assert.equal(f.store.tasks()[0]!.state, 'queued')
+  assert.equal(f.store.records()[0]!.state, 'queued')
   assert.equal(f.sent.length, 0)
   await f.finish()
-  assert.equal(f.store.tasks()[0]!.state, 'succeeded')
-  assert.equal(f.store.tasks().length, 1)
+  assert.equal(f.store.records()[0]!.state, 'succeeded')
+  assert.equal(f.store.records().length, 1)
   assert.equal(f.sent.length, 1)
 })

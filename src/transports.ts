@@ -4,7 +4,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { ImapFlow } from 'imapflow'
 import type SMTPTransport from 'nodemailer/lib/smtp-transport/index.js'
 import type { Account, Config } from './config.ts'
-import { MailRuntime, identity } from './runtime.ts'
+import type { MailRuntime } from './runtime.ts'
+import { identity, mailIdentity } from './identity.ts'
 import { MailError, type SendOutcome, type OutboundMessage } from './types.ts'
 import { createImapConnection, createSmtpTransport } from './connections.ts'
 
@@ -45,14 +46,15 @@ export class ImapReceiver {
         const validity = mailbox.uidValidity.toString()
         const key = identity(this.account.id, folder)
         let cursor = this.runtime.cursor(key)
-        if (cursor && cursor.validity !== validity) throw new MailError('uidvalidity-changed-review-required')
+        if (cursor && cursor.kind !== 'imap') throw new MailError('mailbox-cursor-protocol-mismatch')
+        if (cursor && cursor.uidValidity !== validity) throw new MailError('uidvalidity-changed-review-required')
         if (!cursor) {
           let high = 0
           if (receive.initialSync === 'new-only') {
             if (!mailbox.uidNext) throw new MailError('uidnext-unavailable')
             high = mailbox.uidNext - 1
           }
-          cursor = { validity, high }
+          cursor = { kind: 'imap', uidValidity: validity, high }
           await this.runtime.checkpoint(key, cursor)
         }
         while (!signal.aborted && !disconnected) {
@@ -78,9 +80,9 @@ export class ImapReceiver {
               if (!tooLarge) raw = Buffer.concat(chunks)
             }
             if (!(meta.internalDate instanceof Date)) throw new MailError('receive-time-unavailable')
-            await this.runtime.admit({ account: this.account.id, folder, uidValidity: validity, uid,
+            await this.runtime.admit({ id: mailIdentity(this.account.id, folder, validity, uid), account: this.account.id,
               receivedAt: meta.internalDate.getTime(), raw, tooLarge })
-            cursor = { validity, high: uid }
+            cursor = { kind: 'imap', uidValidity: validity, high: uid }
             await this.runtime.checkpoint(key, cursor)
           }
           this.runtime.health.set(healthKey, 'healthy')

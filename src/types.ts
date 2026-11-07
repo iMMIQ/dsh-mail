@@ -33,12 +33,10 @@ export interface Mail {
   attachments: { name: string; contentType: string; content: Buffer }[]
 }
 
-/** Stable provider identity; POP3 encodes the source and UIDL in uidValidity with uid zero. */
+/** A bounded message identified by its receiving protocol before admission. */
 export interface Delivery {
+  id: MailId
   account: string
-  folder: string
-  uidValidity: string
-  uid: number
   receivedAt: number
   raw: Buffer
   tooLarge?: boolean
@@ -52,7 +50,7 @@ export type TaskResult = z.infer<typeof resultSchema>
 /** Persistent inbox value. Missing or malformed records fail the whole domain open. */
 export const inboxSchema = z.strictObject({
   id: z.string().transform(v => brandString<MailId>(v)),
-  account: z.string(), folder: z.string(), uidValidity: z.string(), uid: z.number().int(),
+  account: z.string(),
   receivedAt: z.number(), rawHash: z.string(),
   state: z.enum(['stored', 'verification_pending', 'ignored', 'quarantined', 'held', 'matched']),
   reason: z.string(), attempts: z.number().int(), nextAt: z.number(),
@@ -61,7 +59,7 @@ export const inboxSchema = z.strictObject({
 export type InboxRecord = z.infer<typeof inboxSchema>
 
 /** One separately submitted mail, including uncertainty after SMTP DATA. */
-const outboxSchema = z.strictObject({
+export const outboxSchema = z.strictObject({
   state: z.enum(['none', 'pending', 'sending', 'accepted', 'failed', 'unknown']),
   messageId: z.string(), attempts: z.number().int(), nextAt: z.number(),
   subject: z.string(), text: z.string(), reason: z.string(),
@@ -77,30 +75,61 @@ export const reportSchema = z.strictObject({
 /** Execution facts included in a result email when the owner recorded them. */
 export type RunReport = z.infer<typeof reportSchema>
 
-/** Atomically stores execution settlement and the corresponding outbox entry. */
-export const taskSchema = z.strictObject({
-  id: z.string().transform(v => brandString<TaskId>(v)), mailId: z.string().transform(v => brandString<MailId>(v)),
+const recordFields = {
+  id: z.string().transform(v => brandString<TaskId>(v)),
   account: z.string(), rule: ruleSchema, createdAt: z.number(),
-  prompt: z.string(), title: z.string(), sessionId: z.string(), messageId: z.string(),
+  title: z.string(), sessionId: z.string(),
   workspacePath: z.string().optional(),
   originalMessageId: z.string().nullable(), references: z.array(z.string()),
-  // Version-one records can contain starting; new executions are claimed as running.
-  state: z.enum(['queued', 'starting', 'running', ...terminalStates]),
-  summary: z.string(), reason: z.string(), attempt: z.number().int(),
+  summary: z.string(), reason: z.string(),
   lastOutput: z.string().optional(),
   report: reportSchema.optional(),
-  sequence: z.number().int().nonnegative().optional(),
-  continuation: z.boolean().optional(),
-  origin: z.literal('session').optional(),
-  inputHash: z.string().optional(),
-  turn: z.number().int().nonnegative().optional(),
-  receipt: outboxSchema.optional(),
   authorization: z.strictObject({ sender: z.string(), policy: senderPolicySchema }),
   operations: z.array(z.strictObject({ kind: z.string(), at: z.number() })),
   outbox: outboxSchema,
+}
+
+/** Executable mail input; settlement and result outbox commit together. */
+export const taskSchema = z.strictObject({
+  ...recordFields, kind: z.literal('task'),
+  mode: z.enum(['new', 'followup']),
+  mailId: z.string().transform(v => brandString<MailId>(v)),
+  prompt: z.string(), messageId: z.string(), attempt: z.number().int(),
+  state: z.enum(['queued', 'running', ...terminalStates]),
+  sequence: z.number().int().nonnegative().optional(), inputHash: z.string().optional(),
+  receipt: outboxSchema.optional(),
 })
-/** Complete execution and notification state. */
+/** One observed Session turn with no executable email input. */
+export const notificationSchema = z.strictObject({
+  ...recordFields, kind: z.literal('notification'), state: z.enum(terminalStates),
+  turn: z.number().int().nonnegative(),
+})
+/** One executable email turn. */
 export type TaskRecord = z.infer<typeof taskSchema>
+/** One result notice from an independently executed Session turn. */
+export type NotificationRecord = z.infer<typeof notificationSchema>
+/** Durable records share routing and submission while retaining distinct execution fields. */
+export const mailRecordSchema = z.discriminatedUnion('kind', [taskSchema, notificationSchema])
+/** Stored mail task or notification, selected by its kind. */
+export type MailRecord = z.infer<typeof mailRecordSchema>
+
+/** Protocol-owned positions; POP3 UIDLs are stored directly. */
+export const mailboxCursorSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('imap'), uidValidity: z.string().regex(/^[1-9][0-9]*$/), high: z.number().int().nonnegative() }),
+  z.strictObject({ kind: z.literal('pop3'), seen: z.array(z.string().regex(/^[!-~]{1,70}$/)).refine(values => new Set(values).size === values.length, 'duplicate POP3 UIDL') }),
+])
+/** A committed receive position for one mailbox. */
+export type MailboxCursor = z.infer<typeof mailboxCursorSchema>
+/** Notification recovery begins at a persisted observation time, independent of mailbox positions. */
+export const notificationStateSchema = z.strictObject({ state: z.enum(['observing', 'paused']), since: z.number().int().nonnegative() })
+/** Persistent notification observation or pause state. */
+export type NotificationState = z.infer<typeof notificationStateSchema>
+
+/** Select executable inputs from durable records.
+ * @param record Mail task or independent Session notice.
+ * @returns Whether the record owns an executable mail input.
+ */
+export function isTask(record: MailRecord): record is TaskRecord { return record.kind === 'task' }
 
 /** Settled Agent outcome; text excludes reasoning and raw tool results. */
 export interface ExecutionResult {
@@ -115,17 +144,19 @@ export interface ExecutionResult {
 /** Synchronous reads and durable writes owned by one runtime. */
 export interface MailStore {
   getInbox(id: MailId): InboxRecord | undefined
-  getTask(id: TaskId): TaskRecord | undefined
+  getRecord(id: TaskId): MailRecord | undefined
   readonly inboxCount: number
-  readonly taskCount: number
+  readonly recordCount: number
   inbox(): readonly InboxRecord[]
-  tasks(): readonly TaskRecord[]
+  records(): readonly MailRecord[]
   putInbox(record: InboxRecord): Promise<void>
-  putTask(record: TaskRecord): Promise<void>
+  putRecord(record: MailRecord): Promise<void>
   /** Transform the record current at the domain's serialized write slot. */
-  updateTask(id: TaskId, update: (record: TaskRecord) => TaskRecord): Promise<TaskRecord>
-  cursor(key: string): { validity: string; high: number } | undefined
-  putCursor(key: string, value: { validity: string; high: number }): Promise<void>
+  updateRecord(id: TaskId, update: (record: MailRecord) => MailRecord): Promise<MailRecord>
+  cursor(key: string): MailboxCursor | undefined
+  putCursor(key: string, value: MailboxCursor): Promise<void>
+  notificationState(): NotificationState | undefined
+  putNotificationState(value: NotificationState): Promise<void>
   close(): Promise<void>
 }
 

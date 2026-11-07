@@ -11,7 +11,6 @@ const states: Record<ResultReport['state'], { label: string; color: string; back
   timed_out: { label: '执行超时', color: '#9b620f', background: '#fff5df' },
   needs_attention: { label: '需要核对', color: '#9b620f', background: '#fff5df' },
   queued: { label: '已排队', color: '#365ea8', background: '#edf3ff' },
-  starting: { label: '准备执行', color: '#365ea8', background: '#edf3ff' },
   running: { label: '执行中', color: '#365ea8', background: '#edf3ff' },
 }
 const styles: Record<string, string> = {

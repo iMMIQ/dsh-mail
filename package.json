@@ -1,6 +1,6 @@
 {
   "name": "dsh-mail",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Rule-driven email tasks and replies for DeepSeek Harness",
   "type": "module",
@@ -130,6 +130,7 @@
     "@deepseek-ai/dsh-session-title": "0.2.2-rc.1",
     "@deepseek-ai/dsh-settings": "0.2.2-rc.1",
     "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-storage-json": "0.2.2-rc.1",
     "@deepseek-ai/dsh-storage-sqlite": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
     "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",

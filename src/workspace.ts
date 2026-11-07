@@ -5,7 +5,7 @@ import { isAbsolute } from 'node:path'
 import { load, JSON_SCHEMA } from 'js-yaml'
 import { z } from 'zod'
 import type { Rule } from './config.ts'
-import { MailError, type Mail, type TaskRecord } from './types.ts'
+import { MailError, type Mail, type MailRecord } from './types.ts'
 
 const metadataSchema = z.strictObject({ workspace: z.string().min(1).refine(value => isAbsolute(value) && !/[\r\n\0]/.test(value)) })
 
@@ -51,11 +51,11 @@ export async function emailWorkspace(mail: Mail, rule: Rule, maxMetadataBytes: n
 }
 
 /**
- * Read the selected directory, retaining compatibility with fixed-directory task records.
- * @param task - durable task, including pre-selection records.
+ * Read the selected directory, retaining a rule's explicit directory as a fallback.
+ * @param task - durable mail task or Session notice.
  * @returns the selected directory or the legacy rule's explicit directory.
  */
-export function taskWorkspace(task: TaskRecord): string {
+export function taskWorkspace(task: MailRecord): string {
   if (task.workspacePath !== undefined) return task.workspacePath
   if (task.rule.task.workspacePath !== undefined) return task.rule.task.workspacePath
   throw new MailError('task-workspace-missing')

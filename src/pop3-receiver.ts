@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 /** POP3 polling uses durable UIDLs rather than session-local message numbers. */
 import { setTimeout as delay } from 'node:timers/promises'
-import { z } from 'zod'
 import type { Account, Config } from './config.ts'
 import { Pop3Connection } from './pop3.ts'
-import { MailRuntime, identity } from './runtime.ts'
+import type { MailRuntime } from './runtime.ts'
+import { identity, mailIdentity } from './identity.ts'
 import type { ResolveSecret } from './transports.ts'
 import { MailError } from './types.ts'
-
-const remembered = z.array(z.string().regex(/^[!-~]{1,70}$/))
 
 /** One cancellable connection per scan; successful admissions survive reconnect and restart. */
 export class Pop3Receiver {
@@ -32,9 +30,10 @@ export class Pop3Receiver {
         client = await Pop3Connection.open(receive, password, this.config.runtime.connectionTimeoutMs, signal)
         const rows = await client.list(this.config.runtime.maxMessageBytes)
         const cursor = this.runtime.cursor(key)
-        const seen = new Set(cursor ? remembered.parse(JSON.parse(cursor.validity)) : [])
+        if (cursor && cursor.kind !== 'pop3') throw new MailError('mailbox-cursor-protocol-mismatch')
+        const seen = new Set(cursor?.seen ?? [])
         const save = async (): Promise<void> => {
-          await this.runtime.checkpoint(key, { validity: JSON.stringify(rows.filter(row => seen.has(row.uid)).map(row => row.uid)), high: 0 })
+          await this.runtime.checkpoint(key, { kind: 'pop3', seen: rows.filter(row => seen.has(row.uid)).map(row => row.uid) })
         }
         if (!cursor && receive.initialSync === 'new-only') {
           for (const row of rows) seen.add(row.uid)
@@ -56,7 +55,7 @@ export class Pop3Receiver {
                 disconnected = true
               }
             }
-            await this.runtime.admit({ account: this.account.id, folder: 'INBOX', uidValidity: identity(source, row.uid), uid: 0,
+            await this.runtime.admit({ id: mailIdentity(this.account.id, 'INBOX', identity(source, row.uid), 0), account: this.account.id,
               receivedAt: Date.now(), raw, tooLarge })
             seen.add(row.uid)
             await save()

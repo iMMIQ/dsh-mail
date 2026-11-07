@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'bun:test'
 import { simpleParser } from 'mailparser'
 import { MailRuntime } from '../src/runtime.ts'
+import { identity } from '../src/identity.ts'
 import { ImapReceiver, smtpSender } from '../src/transports.ts'
 import { verifySender } from '../src/auth.ts'
 import { parseMail } from '../src/mail.ts'
@@ -27,8 +28,13 @@ test('real TLS IMAP reception executes and submits a threaded SMTP result', asyn
   receiver.start()
   await waitFor(() => [...runtime.health.values()].includes('healthy'), () => JSON.stringify(runtime.status()))
   assert.equal(f.store.inbox().length, 0)
+  const key = identity(account.id, 'INBOX')
+  const baseline = runtime.cursor(key)
+  assert.ok(baseline?.kind === 'imap')
+  assert.equal(baseline.high, 1)
   servers.imap.appendMessage('INBOX', [], new Date(), message().toString())
-  await waitFor(() => f.store.inbox().length === 1, () => JSON.stringify(runtime.status()))
+  await waitFor(() => { const cursor = runtime.cursor(key); return f.store.inbox().length === 1 && cursor?.kind === 'imap' && cursor.high === 2 }, () => JSON.stringify(runtime.status()))
+  assert.equal(f.store.inbox()[0]!.id, identity(account.id, 'INBOX', baseline.uidValidity, 2))
   await runtime.tick(); await runtime.whenSettled(); await runtime.tick()
   assert.equal(f.executed.length, 1)
   assert.equal(servers.received.length, 1)
@@ -41,7 +47,7 @@ test('real TLS IMAP reception executes and submits a threaded SMTP result', asyn
   assert.match(response.body, /Status: succeeded/)
   assert.equal(response.references[0], '<fixture@example.com>')
   assert.ok(response.headers.some(h => h.key === 'auto-submitted' && h.line.includes('auto-replied')))
-  assert.equal(f.store.tasks()[0]?.outbox.state, 'accepted')
+  assert.equal(f.store.records()[0]?.outbox.state, 'accepted')
 })
 
 for (const behavior of ['reject', 'drop'] as const) {
@@ -51,7 +57,7 @@ for (const behavior of ['reject', 'drop'] as const) {
     const f = await fixture(t)
     await f.runtime.admit(f.delivery()); await f.finish()
     Object.assign(f.config.accounts[0]!.send!, { host: '127.0.0.1', port: servers.smtpPort, ca: servers.ca, auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
-    const task = f.store.tasks()[0]!
+    const task = f.store.records()[0]!
     const outcome = await smtpSender(f.config, async () => 'testpass')(outboundMessage(task, task.outbox, f.config), new AbortController().signal)
     assert.equal(servers.received.length, 1)
     assert.equal(outcome.state, behavior === 'reject' ? 'failed' : 'unknown')
@@ -69,5 +75,47 @@ test('an untrusted TLS certificate fails before IMAP can admit messages', async 
   f.cleanup.defer(() => receiver.close())
   receiver.start()
   await waitFor(() => [...f.runtime.health.values()].includes('imap-connection-failed'), () => 'TLS certificate rejection')
+  assert.equal(f.store.inbox().length, 0)
+})
+
+
+test('an IMAP receiver resumes its typed cursor without admitting historical UIDs again', async () => {
+  await using resources = new AsyncDisposableStack()
+  const server = await imapServer(resources)
+  const f = await fixture(resources)
+  const account = f.config.accounts[0]!
+  Object.assign(account.receive!, { host: '127.0.0.1', port: server.imapPort, ca: server.ca, initialSync: 'all', rescanIntervalMs: 30,
+    auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
+  const key = identity(account.id, 'INBOX')
+  const start = (): ImapReceiver => {
+    const receiver = new ImapReceiver(account, f.config, f.runtime, async () => 'testpass')
+    f.cleanup.defer(() => receiver.close()); receiver.start(); return receiver
+  }
+  server.imap.appendMessage('INBOX', [], new Date(), f.delivery(1).raw.toString())
+  const first = start()
+  await waitFor(() => { const cursor = f.runtime.cursor(key); return f.store.inbox().length === 1 && cursor?.kind === 'imap' && cursor.high === 1 }, () => 'first IMAP UID committed')
+  await first.close()
+  const baseline = f.runtime.cursor(key)
+  assert.ok(baseline?.kind === 'imap')
+  server.imap.appendMessage('INBOX', [], new Date(), f.delivery(2).raw.toString())
+  start()
+  await waitFor(() => { const cursor = f.runtime.cursor(key); return f.store.inbox().length === 2 && cursor?.kind === 'imap' && cursor.high === 2 }, () => 'next IMAP UID committed after restart')
+  assert.deepEqual(f.store.inbox().map(record => record.id), [identity(account.id, 'INBOX', baseline.uidValidity, 1), identity(account.id, 'INBOX', baseline.uidValidity, 2)])
+})
+
+test('an IMAP receiver refuses a POP3 cursor without overwriting it or admitting mail', async () => {
+  await using resources = new AsyncDisposableStack()
+  const server = await imapServer(resources)
+  const f = await fixture(resources)
+  const account = f.config.accounts[0]!
+  Object.assign(account.receive!, { host: '127.0.0.1', port: server.imapPort, ca: server.ca, initialSync: 'all', rescanIntervalMs: 30,
+    auth: { user: 'testuser', credentialRef: 'MAIL_PASSWORD' } })
+  const key = identity(account.id, 'INBOX')
+  await f.runtime.checkpoint(key, { kind: 'pop3', seen: ['retained-message'] })
+  server.imap.appendMessage('INBOX', [], new Date(), message().toString())
+  const receiver = new ImapReceiver(account, f.config, f.runtime, async () => 'testpass')
+  f.cleanup.defer(() => receiver.close()); receiver.start()
+  await waitFor(() => f.runtime.health.get('work:INBOX') === 'mailbox-cursor-protocol-mismatch', () => 'IMAP cursor mismatch reported')
+  assert.deepEqual(f.runtime.cursor(key), { kind: 'pop3', seen: ['retained-message'] })
   assert.equal(f.store.inbox().length, 0)
 })

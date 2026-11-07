@@ -44,8 +44,8 @@ export class DshExecutor implements TaskExecutor {
     const messageId = brandString<MessageId>(task.messageId)
     const selectedWorkspace = taskWorkspace(task)
     const stored = await this.ctx.sessionPersistence.stat(sessionId)
-    if (task.continuation && !stored) throw new MailError('session-missing-review-required')
-    if (!task.continuation && stored) throw new MailError('session-already-exists-review-required')
+    if (task.mode === 'followup' && !stored) throw new MailError('session-missing-review-required')
+    if (task.mode === 'new' && stored) throw new MailError('session-already-exists-review-required')
     if (stored && stored.header.cwd !== selectedWorkspace) throw new MailError('workspace-changed')
     let storedPreset = stored?.header.agentPreset
     if (stored) {

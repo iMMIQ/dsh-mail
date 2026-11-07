@@ -50,7 +50,7 @@ workspace: /srv/projects/my-project
 
 ## 管理与开发
 
-任务取消、重试和收发信排查见[故障处理](docs/operations.md)。
+任务取消、重试和收发信排查见[故障处理](docs/operations.md)。已有安装升级到 0.2 时，请先阅读[升级说明](docs/upgrading.md)。
 
 ```sh
 bun run check

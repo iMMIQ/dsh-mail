@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'bun:test'
+import { isTask } from '../src/types.ts'
 import { replyHtml } from '../src/email-template.ts'
 import { prepareReport } from '../src/report.ts'
 import { emailExample } from './email-fixture.ts'
@@ -72,17 +73,18 @@ test('HTML is frozen with settlement and stays identical across SMTP retries', a
   assert.equal(bodies.length, 2)
   assert.ok(bodies[0])
   assert.equal(bodies[1], bodies[0])
-  assert.equal(f.store.tasks()[0]!.outbox.state, 'accepted')
+  assert.equal(f.store.records()[0]!.outbox.state, 'accepted')
 })
 
 test('restart recovery does not invent the end time or elapsed execution duration', async () => {
   await using resources = new AsyncDisposableStack()
   const f = await fixture(resources)
   await f.runtime.admit(f.delivery()); await f.finish()
-  const previous = f.store.tasks()[0]!
-  await f.store.putTask({ ...previous, state: 'running', report: { startedAt: previous.createdAt, steps: 2 } })
+  const previous = f.store.records()[0]!
+  assert.ok(isTask(previous))
+  await f.store.putRecord({ ...previous, state: 'running', report: { startedAt: previous.createdAt, steps: 2 } })
   await f.runtime.initialize()
-  const recovered = f.store.tasks()[0]!
+  const recovered = f.store.records()[0]!
   assert.equal(recovered.state, 'needs_attention')
   assert.equal(recovered.report?.finishedAt, undefined)
   assert.doesNotMatch(recovered.outbox.html!, /用时|结束时间/)

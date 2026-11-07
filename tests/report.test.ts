@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
 import { renderResult } from '../src/outbound.ts'
-import { emailExample } from './email-fixture.ts'
+import { emailExample, notificationExample } from './email-fixture.ts'
 
 test('both result alternatives use the configured directory when an older task has no selected directory', () => {
   const task = emailExample()
@@ -30,11 +30,12 @@ test('an automatic summary uses presentation defaults without storing their word
   const execution = renderResult(task, 65_536)
   assert.match(execution.text, /Summary:\nAgent completed normally\./)
   assert.ok(execution.html?.includes('本轮任务已完成，以下是 Agent 的最后回复。'))
-  task.origin = 'session'
-  const notification = renderResult(task, 65_536)
+  const notice = notificationExample()
+  notice.summary = ''
+  const notification = renderResult(notice, 65_536)
   assert.match(notification.text, /Summary:\nDSH turn completed\./)
   assert.ok(notification.html?.includes('本轮任务已完成，以下是 Agent 的最后回复。'))
-  task.continuation = true
+  task.mode = 'followup'
   assert.match(renderResult(task, 65_536).text, /Summary:\nAgent completed normally\./)
   assert.equal(task.summary, '')
 })

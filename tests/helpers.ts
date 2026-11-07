@@ -10,6 +10,7 @@ import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { Config } from '../src/config.ts'
 import { DomainMailStore, Spool } from '../src/store.ts'
 import { MailRuntime } from '../src/runtime.ts'
+import { mailIdentity } from '../src/identity.ts'
 import type { RuntimeDependencies, Delivery, TaskRecord, OutboundMessage } from '../src/types.ts'
 
 /** A syntactically real message whose MTA assertion is accepted only by explicit policy. */
@@ -67,7 +68,7 @@ export async function fixture(t: AsyncDisposableStack, override: Partial<Runtime
   const runtime = new MailRuntime(config, spool, deps)
   cleanup.defer(() => runtime.close())
   await runtime.initialize()
-  const delivery = (uid = 1, raw = message()): Delivery => ({ account: 'work', folder: 'INBOX', uidValidity: '1', uid, receivedAt: now, raw: Buffer.from(raw.toString().replace('Message-ID: <fixture@example.com>', `Message-ID: <fixture-${uid}@example.com>`)) })
+  const delivery = (uid = 1, raw = message()): Delivery => ({ id: mailIdentity('work', 'INBOX', '1', uid), account: 'work', receivedAt: now, raw: Buffer.from(raw.toString().replace('Message-ID: <fixture@example.com>', `Message-ID: <fixture-${uid}@example.com>`)) })
   const finish = async (): Promise<void> => { await runtime.tick(); await runtime.whenSettled(); now += 10; await runtime.tick() }
   return { directory, config, store, facility, spool, runtime, deps, executed, sent, reports, cleanup, directories, delivery, finish, advance: () => { now += 10_000 } }
 }

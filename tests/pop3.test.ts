@@ -6,6 +6,7 @@ import { checkConnection } from '../src/check.ts'
 import { Pop3Connection } from '../src/pop3.ts'
 import { Pop3Receiver } from '../src/pop3-receiver.ts'
 import { MailRuntime } from '../src/runtime.ts'
+import { identity } from '../src/identity.ts'
 import { smtpSender } from '../src/transports.ts'
 import { parseMail } from '../src/mail.ts'
 import { configuration, fixture, message } from './helpers.ts'
@@ -35,12 +36,16 @@ for (const mode of ['direct', 'starttls'] as const) {
     receiver.start()
     await waitFor(() => runtime.health.get('work:POP3') === 'healthy', () => 'POP3 baseline')
     assert.equal(f.store.inbox().length, 0)
+    const source = identity('pop3', account.receive.host, account.receive.port, account.receive.auth.user)
+    const key = identity(account.id, source)
+    assert.deepEqual(runtime.cursor(key), { kind: 'pop3', seen: ['history'] })
     server.messages.push({ uid: 'task', raw: message() })
-    await waitFor(() => f.store.inbox().length === 1, () => JSON.stringify(runtime.status()))
+    await waitFor(() => { const cursor = runtime.cursor(key); return f.store.inbox().length === 1 && cursor?.kind === 'pop3' && cursor.seen.includes('task') }, () => JSON.stringify(runtime.status()))
+    assert.equal(f.store.inbox()[0]!.id, identity(account.id, 'INBOX', identity(source, 'task'), 0))
     await runtime.tick(); await runtime.whenSettled(); await runtime.tick()
     assert.equal(f.executed.length, 1)
     assert.equal(smtp.received.length, 1)
-    assert.equal(f.store.tasks()[0]?.outbox.state, 'accepted')
+    assert.equal(f.store.records()[0]?.outbox.state, 'accepted')
     const reply = await parseMail(smtp.received[0]!, f.config.runtime)
     assert.match(reply.body, /Status: succeeded/)
     assert.deepEqual(reply.references, ['<fixture@example.com>'])
@@ -65,11 +70,15 @@ test('POP3 UIDLs survive receiver restart, deletions and message renumbering', a
   const first = start()
   await waitFor(() => f.store.inbox().length === 2 && f.runtime.health.get('work:POP3') === 'healthy', () => 'both POP3 messages admitted')
   await first.close()
+  const source = identity('pop3', account.receive.host, account.receive.port, account.receive.auth.user)
+  const key = identity(account.id, source)
+  assert.deepEqual(f.runtime.cursor(key), { kind: 'pop3', seen: ['first', 'second'] })
   server.messages.shift()
   server.messages.push({ uid: 'third', raw: f.delivery(3).raw })
   const before = server.scans()
   start()
-  await waitFor(() => server.scans() > before && f.store.inbox().length === 3, () => 'only new UIDL admitted after renumbering')
+  await waitFor(() => { const cursor = f.runtime.cursor(key); return server.scans() > before && f.store.inbox().length === 3 && cursor?.kind === 'pop3' && cursor.seen.includes('third') }, () => 'only new UIDL admitted after renumbering')
+  assert.deepEqual(f.runtime.cursor(key), { kind: 'pop3', seen: ['second', 'third'] })
   for (let i = 0; i < 3; i++) await f.finish()
   assert.equal(f.executed.length, 3)
   assert.deepEqual(server.commands.filter(command => command.name === 'RETR').map(command => command.argument), ['1', '2', '2'])
@@ -255,4 +264,23 @@ test('POP3 configuration rejects folder settings and unencrypted transport', () 
   assert.equal(Config.safeParse({ ...config, accounts: [{ ...config.accounts[0]!, receive }] }).success, false)
   const { folders: _folders, ...pop3 } = config.accounts[0]!.receive!.protocol === 'imap' ? config.accounts[0]!.receive! : { folders: [] }
   assert.equal(Config.safeParse({ ...config, accounts: [{ ...config.accounts[0]!, receive: { ...pop3, protocol: 'pop3', tls: 'none' } }] }).success, false)
+})
+
+
+test('a POP3 receiver refuses an IMAP cursor without overwriting it or downloading mail', async () => {
+  await using resources = new AsyncDisposableStack()
+  const server = await pop3Server(resources)
+  const f = await fixture(resources)
+  const account = f.config.accounts[0]!
+  account.receive = { ...reception(server), initialSync: 'all' }
+  const source = identity('pop3', account.receive.host, account.receive.port, account.receive.auth.user)
+  const key = identity(account.id, source)
+  await f.runtime.checkpoint(key, { kind: 'imap', uidValidity: '77', high: 3 })
+  server.messages.push({ uid: 'task', raw: message() })
+  const receiver = new Pop3Receiver(account, f.config, f.runtime, async () => 'testpass')
+  f.cleanup.defer(() => receiver.close()); receiver.start()
+  await waitFor(() => f.runtime.health.get('work:POP3') === 'mailbox-cursor-protocol-mismatch', () => 'POP3 cursor mismatch reported')
+  assert.deepEqual(f.runtime.cursor(key), { kind: 'imap', uidValidity: '77', high: 3 })
+  assert.equal(f.store.inbox().length, 0)
+  assert.ok(!server.commands.some(command => command.name === 'RETR'))
 })
